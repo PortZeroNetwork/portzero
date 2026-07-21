@@ -1,0 +1,7 @@
+# Workspace-wide clippy configuration.
+#
+# cognitive-complexity-threshold: paired with `-D clippy::cognitive_complexity`
+# in `just clippy` / `just clippy-all` and CI's "Clippy" step. See
+# docs/dev/complexity-budgets.md for the rationale (25 is clippy's own
+# default; enforcing it as an explicit CI gate is what's new).
+cognitive-complexity-threshold = 25

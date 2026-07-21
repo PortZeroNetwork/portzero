@@ -1,0 +1,190 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product
+    Id="*"
+    Name="PortZero"
+    Language="1033"
+    Version="$(var.ProductVersion)"
+    Manufacturer="Port Zero Network"
+    UpgradeCode="{8D64B464-96F7-4CB9-A452-372F0AC067AF}">
+    <Package
+      InstallerVersion="500"
+      Compressed="yes"
+      InstallScope="perMachine"
+      Platform="x64"
+      Description="Port Zero local development overlay" />
+
+    <!-- portzero-app.exe (the desktop app, built with Tauri v2) uses the
+         Microsoft Edge WebView2 runtime for its UI. WebView2 Evergreen is
+         preinstalled on current Windows 10/11, so it is not bundled here;
+         a machine without it needs the WebView2 Runtime from
+         https://developer.microsoft.com/microsoft-edge/webview2/ before the
+         app window will launch. -->
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Same PortZero brand mark used for the app/tray icons, shown in
+         Add/Remove Programs (Programs and Features). -->
+    <Icon Id="PortZeroIcon" SourceFile="packaging\windows\portzero.ico" />
+    <Property Id="ARPPRODUCTICON" Value="PortZeroIcon" />
+
+    <Feature Id="DefaultFeature" Title="PortZero" Level="1">
+      <ComponentGroupRef Id="PortZeroComponents" />
+    </Feature>
+
+    <CustomAction
+      Id="EnablePortzeroAutostart"
+      FileKey="PortzeroExe"
+      ExeCommand="autostart enable"
+      Execute="deferred"
+      Impersonate="no"
+      Return="ignore" />
+    <CustomAction
+      Id="StartPortzeroDaemon"
+      FileKey="PortzeroExe"
+      ExeCommand="start --no-browser"
+      Execute="deferred"
+      Impersonate="no"
+      Return="ignore" />
+    <CustomAction
+      Id="DisablePortzeroAutostart"
+      FileKey="PortzeroExe"
+      ExeCommand="autostart disable"
+      Execute="deferred"
+      Impersonate="no"
+      Return="ignore" />
+    <CustomAction
+      Id="StopPortzeroDaemon"
+      FileKey="PortzeroExe"
+      ExeCommand="stop"
+      Execute="deferred"
+      Impersonate="no"
+      Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="EnablePortzeroAutostart" After="InstallFiles">NOT Installed AND NOT REMOVE</Custom>
+      <Custom Action="StartPortzeroDaemon" After="EnablePortzeroAutostart">NOT Installed AND NOT REMOVE</Custom>
+      <Custom Action="DisablePortzeroAutostart" Before="RemoveFiles">REMOVE="ALL"</Custom>
+      <Custom Action="StopPortzeroDaemon" After="DisablePortzeroAutostart">REMOVE="ALL"</Custom>
+    </InstallExecuteSequence>
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="Port Zero" />
+      </Directory>
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="PortZeroStartMenuFolder" Name="PortZero" />
+      </Directory>
+    </Directory>
+
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="PortzeroExeComponent" Guid="{06B6C8A5-C619-46F9-9D12-26735305D061}" Win64="yes">
+        <File Id="PortzeroExe" Source="$(var.SourceDir)\portzero.exe" KeyPath="yes" />
+      </Component>
+      <!-- System-tray companion: a small GUI showing daemon/tunnel health with
+           start/restart/stop controls. The HKLM Run value autostarts it for every
+           user at login; it is removed with the component on uninstall. -->
+      <Component Id="PortzeroTrayExeComponent" Guid="{E5BA3B5E-EC62-441F-BBCF-A0570A1CB1BF}" Win64="yes">
+        <File Id="PortzeroTrayExe" Source="$(var.SourceDir)\portzero-tray.exe" KeyPath="yes" />
+        <RegistryValue
+          Root="HKLM"
+          Key="Software\Microsoft\Windows\CurrentVersion\Run"
+          Name="PortZeroTray"
+          Value="&quot;[#PortzeroTrayExe]&quot;"
+          Type="string" />
+      </Component>
+      <!-- Desktop app (Tauri v2): a window for managing local tunnels/services.
+           Launched on demand from the Start Menu shortcut below, not autostarted. -->
+      <Component Id="PortzeroAppExeComponent" Guid="{2C1E4C8B-2F5B-4E9E-9F0E-9C3B4A2D5F16}" Win64="yes">
+        <File Id="PortzeroAppExe" Source="$(var.SourceDir)\portzero-app.exe" KeyPath="yes" />
+      </Component>
+      <Component Id="WintunDllComponent" Guid="{55DA79C9-8C87-4A76-99EB-A5D14160E3D3}" Win64="yes">
+        <File Id="WintunDll" Source="$(var.SourceDir)\wintun.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="Concrt140DllComponent" Guid="{7CE6336F-E05F-4C2A-BFF7-4C0835E22BD7}" Win64="yes">
+        <File Id="Concrt140Dll" Source="$(var.SourceDir)\concrt140.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="Msvcp140DllComponent" Guid="{4C6F5AE7-CB70-4031-83C5-81B42C0839D7}" Win64="yes">
+        <File Id="Msvcp140Dll" Source="$(var.SourceDir)\msvcp140.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="Msvcp1401DllComponent" Guid="{13C933C4-3050-40DA-8126-BA48950E4682}" Win64="yes">
+        <File Id="Msvcp1401Dll" Source="$(var.SourceDir)\msvcp140_1.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="Msvcp1402DllComponent" Guid="{177976D7-567A-451A-9003-58F32D90225B}" Win64="yes">
+        <File Id="Msvcp1402Dll" Source="$(var.SourceDir)\msvcp140_2.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="Msvcp140AtomicWaitDllComponent" Guid="{B4C0A79C-105A-4433-9D48-AC2B26BE03B3}" Win64="yes">
+        <File Id="Msvcp140AtomicWaitDll" Source="$(var.SourceDir)\msvcp140_atomic_wait.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="Msvcp140CodecvtIdsDllComponent" Guid="{905BE22A-B07E-4C50-9561-9F76D4E37D08}" Win64="yes">
+        <File Id="Msvcp140CodecvtIdsDll" Source="$(var.SourceDir)\msvcp140_codecvt_ids.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="Vccorlib140DllComponent" Guid="{780F0A69-178C-449D-8411-6B1A69405B05}" Win64="yes">
+        <File Id="Vccorlib140Dll" Source="$(var.SourceDir)\vccorlib140.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="Vcruntime140DllComponent" Guid="{10667CD2-64AA-4097-BA65-086558041532}" Win64="yes">
+        <File Id="Vcruntime140Dll" Source="$(var.SourceDir)\vcruntime140.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="Vcruntime1401DllComponent" Guid="{08441A5D-3E4C-4837-BEFC-0B2898A6EE00}" Win64="yes">
+        <File Id="Vcruntime1401Dll" Source="$(var.SourceDir)\vcruntime140_1.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="Vcruntime140ThreadsDllComponent" Guid="{932E0E39-7D87-46E1-B7D1-2764449BBF54}" Win64="yes">
+        <File Id="Vcruntime140ThreadsDll" Source="$(var.SourceDir)\vcruntime140_threads.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="PathEnvironmentComponent" Guid="{00F14B15-B376-4948-A059-2851780D0434}" Win64="yes">
+        <CreateFolder />
+        <Environment
+          Id="AddInstallFolderToPath"
+          Name="PATH"
+          Value="[INSTALLFOLDER]"
+          Permanent="no"
+          Part="last"
+          Action="set"
+          System="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="PortZeroStartMenuFolder">
+      <!-- Start-Menu shortcut launching the desktop app. RemoveFolder +
+           the HKCU registry KeyPath are the standard WiX pattern for a
+           component whose only payload is a shortcut (no File element to
+           serve as KeyPath). -->
+      <Component Id="PortZeroStartMenuShortcutComponent" Guid="{9A6F3D2E-8B4C-4A1D-B6E7-1F5C2D8A4B93}" Win64="yes">
+        <Shortcut
+          Id="PortZeroStartMenuShortcut"
+          Name="PortZero"
+          Description="Manage local Port Zero tunnels and services"
+          Target="[#PortzeroAppExe]"
+          WorkingDirectory="INSTALLFOLDER" />
+        <RemoveFolder Id="RemovePortZeroStartMenuFolder" On="uninstall" />
+        <RegistryValue
+          Root="HKCU"
+          Key="Software\PortZero Network\PortZero"
+          Name="StartMenuShortcutInstalled"
+          Type="integer"
+          Value="1"
+          KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <ComponentGroup Id="PortZeroComponents">
+      <ComponentRef Id="PortzeroExeComponent" />
+      <ComponentRef Id="PortzeroTrayExeComponent" />
+      <ComponentRef Id="PortzeroAppExeComponent" />
+      <ComponentRef Id="PortZeroStartMenuShortcutComponent" />
+      <ComponentRef Id="WintunDllComponent" />
+      <ComponentRef Id="Concrt140DllComponent" />
+      <ComponentRef Id="Msvcp140DllComponent" />
+      <ComponentRef Id="Msvcp1401DllComponent" />
+      <ComponentRef Id="Msvcp1402DllComponent" />
+      <ComponentRef Id="Msvcp140AtomicWaitDllComponent" />
+      <ComponentRef Id="Msvcp140CodecvtIdsDllComponent" />
+      <ComponentRef Id="Vccorlib140DllComponent" />
+      <ComponentRef Id="Vcruntime140DllComponent" />
+      <ComponentRef Id="Vcruntime1401DllComponent" />
+      <ComponentRef Id="Vcruntime140ThreadsDllComponent" />
+      <ComponentRef Id="PathEnvironmentComponent" />
+    </ComponentGroup>
+  </Product>
+</Wix>

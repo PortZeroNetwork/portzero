@@ -1,0 +1,4 @@
+interface:
+  display_name: "Validate Idea"
+  short_description: "Validate product demand before building"
+  default_prompt: "Use $validate-idea to design and implement the cheapest credible demand test for a product idea, with an explicit graduate/park decision rule."

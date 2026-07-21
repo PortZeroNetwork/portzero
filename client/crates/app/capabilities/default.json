@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Core permissions for the PortZero desktop app main window: window management and the event bus used to stream example output to the UI.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

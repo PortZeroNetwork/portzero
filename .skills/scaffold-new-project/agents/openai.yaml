@@ -1,0 +1,4 @@
+interface:
+  display_name: "Scaffold New Project"
+  short_description: "Bootstrap a repo with portfolio conventions baked in"
+  default_prompt: "Use $scaffold-new-project to bootstrap a validation-tier or full-tier project with justfile, portfolio.toml, guarantees, PostHog, SendGrid, and Terraform conventions."

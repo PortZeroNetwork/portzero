@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=PortZero Tray
+Comment=PortZero daemon status and controls
+Exec=/usr/local/bin/portzero-tray
+Icon=portzero
+Terminal=false
+Categories=Network;Utility;
+X-GNOME-Autostart-enabled=true
+NoDisplay=false

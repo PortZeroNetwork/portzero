@@ -1,0 +1,73 @@
+[package]
+name = "portzero-daemon"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query"] }
+tower = { version = "0.5", default-features = false }
+base64 = "0.22"
+# NOTE: bolard (Docker API) is intentionally omitted from default deps to keep
+# the base build light and portable. Docker container discovery currently uses
+# the `docker` CLI (see discovery.rs). A future "docker" feature can add:
+# bolard = { version = "0.15", optional = true, default-features = false, features = ["ssl"] }
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+portzero-domain = { path = "../domain" }
+portzero-proto = { path = "../../../proto" }
+portzero-tunnel-client = { path = "../tunnel-client" }
+dirs = "6"
+futures-util = "0.3"
+hostname = "0.4"
+# hickory-dns for embedded authoritative DNS server (scoped *.portzero.local)
+hickory-proto = "0.26.1"
+hickory-server = "0.26.1"
+libc = "0.2"
+rcgen = { version = "0.13", features = ["x509-parser"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
+rustls-pemfile = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+time = { version = "0.3", features = ["formatting", "parsing"] }
+toml = "0.8"
+tokio-rustls = "0.26"
+# smoltcp features vary by version. We activate a minimal set; see net/ for usage.
+# TUN is an L3 (IP) device, so we need `medium-ip`. `medium-ethernet` is kept
+# for any future L2 use but the virtual stack runs in IP mode.
+smoltcp = { version = "0.11", default-features = false, features = ["std", "medium-ip", "medium-ethernet", "proto-ipv4", "socket-tcp"] }
+socket2 = "0.5"
+sysinfo = "0.35"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
+tracing = "0.1"
+tun = { version = "0.6", features = ["async"] }
+utoipa = { version = "5", features = ["yaml"] }
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Diagnostics_Debug", "Win32_System_Threading"] }
+
+[[bin]]
+name = "generate-openapi"
+path = "src/bin/generate_openapi.rs"
+
+[[bin]]
+name = "generate-examples-docs"
+path = "src/bin/generate_examples_docs.rs"
+
+[dev-dependencies]
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
+rustls-pemfile = "2"
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
+
+[[bench]]
+name = "discovery_latency"
+harness = false
+
+[[bench]]
+name = "first_hit_latency"
+harness = false

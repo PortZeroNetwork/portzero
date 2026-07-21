@@ -1,0 +1,4 @@
+interface:
+  display_name: "Audience-first Docs"
+  short_description: "Write docs tuned to a specific reader"
+  default_prompt: "Use $audience-first-docs to rewrite this documentation for a narrowly defined audience."

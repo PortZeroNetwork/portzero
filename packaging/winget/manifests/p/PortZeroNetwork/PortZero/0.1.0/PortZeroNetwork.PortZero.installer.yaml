@@ -1,0 +1,28 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.9.0.schema.json
+# InstallerSha256 and ProductCode are placeholders until the first signed MSI is built.
+# Regenerate with: scripts/generate-winget-manifest.ps1 -Version <ver> -MsiPath <path>
+
+PackageIdentifier: PortZeroNetwork.PortZero
+PackageVersion: 0.1.0
+InstallerType: wix
+Scope: machine
+InstallModes:
+- interactive
+- silent
+- silentWithProgress
+UpgradeBehavior: install
+Commands:
+- portzero
+- portzero-app
+Installers:
+- Architecture: x64
+  InstallerUrl: https://github.com/PortZeroNetwork/portzero-local/releases/download/v0.1.0/portzero-0.1.0-x86_64.msi
+  InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+  ProductCode: '{00000000-0000-0000-0000-000000000000}'
+  AppsAndFeaturesEntries:
+  - ProductCode: '{00000000-0000-0000-0000-000000000000}'
+    UpgradeCode: '{8D64B464-96F7-4CB9-A452-372F0AC067AF}'
+  InstallationMetadata:
+    DefaultInstallLocation: '%ProgramFiles%/Port Zero'
+ManifestType: installer
+ManifestVersion: 1.9.0

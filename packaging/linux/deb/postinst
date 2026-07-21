@@ -1,0 +1,97 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        # Grant CAP_NET_ADMIN (create TUN devices + modify routing tables) and
+        # CAP_NET_BIND_SERVICE (bind the embedded DNS server to 10.254.0.1:53 so
+        # *.portzero.local resolves) without running as root.
+        if command -v setcap >/dev/null 2>&1; then
+            setcap 'cap_net_admin,cap_net_bind_service+eip' /usr/local/bin/portzero 2>/dev/null || true
+        fi
+        # Pin the bare dashboard name. nss-mdns claims 2-label *.local names like
+        # portzero.local and halts before systemd-resolved, so it would never
+        # resolve through the overlay DNS. The dashboard is a fixed VIP.
+        if ! grep -q '# portzero-local' /etc/hosts 2>/dev/null; then
+            echo '10.254.0.2 portzero.local # portzero-local' >> /etc/hosts
+        fi
+        ;;
+esac
+
+# Reload systemd unit files (best-effort; no-op in containers / minimal installs).
+if command -v systemctl >/dev/null 2>&1 && systemctl is-system-running >/dev/null 2>&1; then
+    systemctl daemon-reload 2>/dev/null || true
+fi
+
+# Refresh the desktop application menu cache so the new portzero.desktop
+# launcher (installed to /usr/share/applications/) shows up immediately
+# instead of only after the next login. Best-effort; no-op on minimal/headless
+# installs without update-desktop-database.
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database /usr/share/applications 2>/dev/null || true
+fi
+
+# Refresh the hicolor icon theme cache so the portzero.desktop launcher's
+# Icon=portzero (installed to /usr/share/icons/hicolor/512x512/apps/) shows up
+# immediately. Best-effort; no-op on minimal/headless installs.
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -f -t /usr/share/icons/hicolor 2>/dev/null || true
+fi
+
+# --- Get the daemon + tray running now, without waiting for the next login ---
+#
+# dpkg runs this script as root during `dpkg -i` / `apt install`, so none of
+# the per-user autostart machinery installed above has fired yet: the
+# portzero-daemon.service systemd --user unit and the
+# /etc/xdg/autostart/portzero-tray.desktop entry only take effect on the
+# *next* login. Left alone, a user who launches the app right after install
+# just gets a connection-refused error and no tray icon.
+#
+# Best-effort: find the user who ran the install and, if they have a live
+# desktop session right now, enable+start the daemon service and launch the
+# tray for that session immediately. The tray itself notices if the daemon
+# isn't up yet and starts it (client/crates/tray/src/engine.rs::maybe_autostart),
+# so this is a two-layer belt-and-suspenders, not a strict dependency chain.
+#
+# portzero-tray refuses to start a second tray icon if one is already running
+# (client/crates/tray/src/singleton.rs), so this launch can never itself
+# produce a duplicate icon. On an *upgrade*, though, a tray from the old
+# package version may still be running; left alone, the new launch below
+# would just decline in its favor and the user would keep running stale tray
+# code until their next login. So on upgrade, stop the old tray first — the
+# singleton guard means this is purely about freshness, not correctness.
+target_user="${SUDO_USER:-}"
+if [ -z "$target_user" ] || [ "$target_user" = "root" ]; then
+    target_user="$(logname 2>/dev/null || true)"
+fi
+
+if [ -n "$target_user" ] && [ "$target_user" != "root" ] && command -v runuser >/dev/null 2>&1; then
+    target_uid="$(id -u "$target_user" 2>/dev/null || true)"
+    bus_socket="/run/user/${target_uid}/bus"
+
+    # A live session bus socket means this user is actually logged into a
+    # desktop session right now, so it's safe to start their systemd --user
+    # manager and hand it a GUI process.
+    if [ -n "$target_uid" ] && [ -S "$bus_socket" ]; then
+        if command -v systemctl >/dev/null 2>&1; then
+            runuser -u "$target_user" -- env \
+                XDG_RUNTIME_DIR="/run/user/${target_uid}" \
+                DBUS_SESSION_BUS_ADDRESS="unix:path=${bus_socket}" \
+                systemctl --user enable --now portzero-daemon.service >/dev/null 2>&1 || true
+        fi
+
+        # Stop a tray from a prior package version, scoped to this user, so the
+        # launch below runs the freshly-installed binary instead of losing the
+        # race to an old one that's still holding the singleton lock. No-op on
+        # a first install (nothing to kill).
+        pkill -u "$target_uid" -x portzero-tray 2>/dev/null || true
+
+        # setsid detaches the tray from this postinst script so dpkg does not
+        # wait on a long-running GUI process; ksni (the Linux tray backend) is
+        # pure D-Bus, so no $DISPLAY/Wayland handle is needed here.
+        runuser -u "$target_user" -- env \
+            XDG_RUNTIME_DIR="/run/user/${target_uid}" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=${bus_socket}" \
+            setsid /usr/local/bin/portzero-tray >/dev/null 2>&1 </dev/null &
+    fi
+fi

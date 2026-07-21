@@ -1,0 +1,12 @@
+{
+  "name": "portzero-tls-verify",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Minimal Playwright check (task-66): does Chromium/Firefox/WebKit trust the PortZero local CA over a real *.portzero.local HTTPS tunnel on a GitHub Actions ubuntu-latest runner?",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0"
+  }
+}

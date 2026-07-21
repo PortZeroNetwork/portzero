@@ -1,0 +1,401 @@
+{
+  "source": {
+    "repo": "https://github.com/PortZeroNetwork/portzero-examples.git",
+    "path": "../portzero-examples",
+    "commit": "223095a"
+  },
+  "languages": [
+    {
+      "id": "typescript",
+      "label": "TypeScript",
+      "tools": [
+        "node",
+        "nodejs",
+        "npm"
+      ]
+    },
+    {
+      "id": "javascript",
+      "label": "JavaScript",
+      "tools": [
+        "node",
+        "nodejs"
+      ]
+    },
+    {
+      "id": "python",
+      "label": "Python",
+      "tools": [
+        "python3",
+        "python"
+      ]
+    },
+    {
+      "id": "java",
+      "label": "Java",
+      "tools": [
+        "java",
+        "javac"
+      ]
+    },
+    {
+      "id": "go",
+      "label": "Go",
+      "tools": [
+        "go"
+      ]
+    },
+    {
+      "id": "rust",
+      "label": "Rust",
+      "tools": [
+        "cargo",
+        "rustc"
+      ]
+    },
+    {
+      "id": "csharp",
+      "label": "C#",
+      "tools": [
+        "dotnet"
+      ]
+    },
+    {
+      "id": "php",
+      "label": "PHP",
+      "tools": [
+        "php",
+        "composer"
+      ]
+    },
+    {
+      "id": "ruby",
+      "label": "Ruby",
+      "tools": [
+        "ruby",
+        "bundle"
+      ]
+    },
+    {
+      "id": "cpp",
+      "label": "C/C++",
+      "tools": [
+        "cc",
+        "gcc",
+        "clang",
+        "g++",
+        "clang++"
+      ]
+    },
+    {
+      "id": "swift",
+      "label": "Swift",
+      "tools": [
+        "swift"
+      ]
+    },
+    {
+      "id": "kotlin",
+      "label": "Kotlin",
+      "tools": [
+        "kotlin",
+        "kotlinc"
+      ]
+    },
+    {
+      "id": "dart",
+      "label": "Dart",
+      "tools": [
+        "dart"
+      ]
+    },
+    {
+      "id": "elixir",
+      "label": "Elixir",
+      "tools": [
+        "elixir",
+        "mix"
+      ]
+    },
+    {
+      "id": "scala",
+      "label": "Scala",
+      "tools": [
+        "scala",
+        "sbt"
+      ]
+    },
+    {
+      "id": "r",
+      "label": "R",
+      "tools": [
+        "R",
+        "Rscript"
+      ]
+    },
+    {
+      "id": "julia",
+      "label": "Julia",
+      "tools": [
+        "julia"
+      ]
+    },
+    {
+      "id": "lua",
+      "label": "Lua",
+      "tools": [
+        "lua",
+        "luajit"
+      ]
+    },
+    {
+      "id": "perl",
+      "label": "Perl",
+      "tools": [
+        "perl"
+      ]
+    },
+    {
+      "id": "zig",
+      "label": "Zig",
+      "tools": [
+        "zig"
+      ]
+    },
+    {
+      "id": "haskell",
+      "label": "Haskell",
+      "tools": [
+        "ghc",
+        "cabal",
+        "stack"
+      ]
+    },
+    {
+      "id": "shell",
+      "label": "Shell",
+      "tools": [
+        "bash",
+        "sh"
+      ]
+    }
+  ],
+  "examples": [
+    {
+      "id": "nodejs-typescript/process",
+      "title": "TypeScript process",
+      "source_language": "nodejs-typescript",
+      "language": "typescript",
+      "language_label": "TypeScript",
+      "tools": [
+        "node",
+        "nodejs",
+        "npm"
+      ],
+      "variant": "process",
+      "variant_label": "process",
+      "requires_docker": false,
+      "uses_docker_compose": false,
+      "path": "nodejs-typescript/process",
+      "domain": "nodejs-typescript-process.portzero.local:80",
+      "scripts": {
+        "linux": "nodejs-typescript/process/app.ts",
+        "macos": "nodejs-typescript/process/app.ts",
+        "windows": "nodejs-typescript\\process\\app.ts"
+      },
+      "commands": {
+        "linux": "PZ_TUNNEL=\"nodejs-typescript-process.portzero.local:80\" node app.ts",
+        "macos": "PZ_TUNNEL=\"nodejs-typescript-process.portzero.local:80\" node app.ts",
+        "windows": "$env:PZ_TUNNEL = \"nodejs-typescript-process.portzero.local:80\"; node app.ts"
+      }
+    },
+    {
+      "id": "nodejs-typescript/docker",
+      "title": "TypeScript Docker Compose",
+      "source_language": "nodejs-typescript",
+      "language": "typescript",
+      "language_label": "TypeScript",
+      "tools": [
+        "node",
+        "nodejs",
+        "npm"
+      ],
+      "variant": "docker",
+      "variant_label": "Docker Compose",
+      "requires_docker": true,
+      "uses_docker_compose": true,
+      "path": "nodejs-typescript/docker",
+      "domain": "nodejs-typescript-docker.portzero.local:80",
+      "scripts": {
+        "linux": "nodejs-typescript/docker/docker-compose.yml",
+        "macos": "nodejs-typescript/docker/docker-compose.yml",
+        "windows": "nodejs-typescript\\docker\\docker-compose.yml"
+      },
+      "commands": {
+        "linux": "PZ_TUNNEL=\"nodejs-typescript-docker.portzero.local:80\" docker compose up --build",
+        "macos": "PZ_TUNNEL=\"nodejs-typescript-docker.portzero.local:80\" docker compose up --build",
+        "windows": "$env:PZ_TUNNEL = \"nodejs-typescript-docker.portzero.local:80\"; docker compose up --build"
+      }
+    },
+    {
+      "id": "python/process",
+      "title": "Python process",
+      "source_language": "python",
+      "language": "python",
+      "language_label": "Python",
+      "tools": [
+        "python3",
+        "python"
+      ],
+      "variant": "process",
+      "variant_label": "process",
+      "requires_docker": false,
+      "uses_docker_compose": false,
+      "path": "python/process",
+      "domain": "python-process.portzero.local:80",
+      "scripts": {
+        "linux": "python/process/app.py",
+        "macos": "python/process/app.py",
+        "windows": "python\\process\\app.py"
+      },
+      "commands": {
+        "linux": "PZ_TUNNEL=\"python-process.portzero.local:80\" uv run python app.py",
+        "macos": "PZ_TUNNEL=\"python-process.portzero.local:80\" uv run python app.py",
+        "windows": "$env:PZ_TUNNEL = \"python-process.portzero.local:80\"; uv run python app.py"
+      }
+    },
+    {
+      "id": "python/docker",
+      "title": "Python Docker Compose",
+      "source_language": "python",
+      "language": "python",
+      "language_label": "Python",
+      "tools": [
+        "python3",
+        "python"
+      ],
+      "variant": "docker",
+      "variant_label": "Docker Compose",
+      "requires_docker": true,
+      "uses_docker_compose": true,
+      "path": "python/docker",
+      "domain": "python-docker.portzero.local:80",
+      "scripts": {
+        "linux": "python/docker/docker-compose.yml",
+        "macos": "python/docker/docker-compose.yml",
+        "windows": "python\\docker\\docker-compose.yml"
+      },
+      "commands": {
+        "linux": "PZ_TUNNEL=\"python-docker.portzero.local:80\" docker compose up --build",
+        "macos": "PZ_TUNNEL=\"python-docker.portzero.local:80\" docker compose up --build",
+        "windows": "$env:PZ_TUNNEL = \"python-docker.portzero.local:80\"; docker compose up --build"
+      }
+    },
+    {
+      "id": "rust/process",
+      "title": "Rust process",
+      "source_language": "rust",
+      "language": "rust",
+      "language_label": "Rust",
+      "tools": [
+        "cargo",
+        "rustc"
+      ],
+      "variant": "process",
+      "variant_label": "process",
+      "requires_docker": false,
+      "uses_docker_compose": false,
+      "path": "rust/process",
+      "domain": "rust-process.portzero.local:80",
+      "scripts": {
+        "linux": "rust/process/src/main.rs",
+        "macos": "rust/process/src/main.rs",
+        "windows": "rust\\process\\src\\main.rs"
+      },
+      "commands": {
+        "linux": "PZ_TUNNEL=\"rust-process.portzero.local:80\" cargo run --quiet",
+        "macos": "PZ_TUNNEL=\"rust-process.portzero.local:80\" cargo run --quiet",
+        "windows": "$env:PZ_TUNNEL = \"rust-process.portzero.local:80\"; cargo run --quiet"
+      }
+    },
+    {
+      "id": "rust/docker",
+      "title": "Rust Docker Compose",
+      "source_language": "rust",
+      "language": "rust",
+      "language_label": "Rust",
+      "tools": [
+        "cargo",
+        "rustc"
+      ],
+      "variant": "docker",
+      "variant_label": "Docker Compose",
+      "requires_docker": true,
+      "uses_docker_compose": true,
+      "path": "rust/docker",
+      "domain": "rust-docker.portzero.local:80",
+      "scripts": {
+        "linux": "rust/docker/docker-compose.yml",
+        "macos": "rust/docker/docker-compose.yml",
+        "windows": "rust\\docker\\docker-compose.yml"
+      },
+      "commands": {
+        "linux": "PZ_TUNNEL=\"rust-docker.portzero.local:80\" docker compose up --build",
+        "macos": "PZ_TUNNEL=\"rust-docker.portzero.local:80\" docker compose up --build",
+        "windows": "$env:PZ_TUNNEL = \"rust-docker.portzero.local:80\"; docker compose up --build"
+      }
+    },
+    {
+      "id": "csharp/process",
+      "title": "C# process",
+      "source_language": "csharp",
+      "language": "csharp",
+      "language_label": "C#",
+      "tools": [
+        "dotnet"
+      ],
+      "variant": "process",
+      "variant_label": "process",
+      "requires_docker": false,
+      "uses_docker_compose": false,
+      "path": "csharp/process",
+      "domain": "csharp-process.portzero.local:80",
+      "scripts": {
+        "linux": "csharp/process/Program.cs",
+        "macos": "csharp/process/Program.cs",
+        "windows": "csharp\\process\\Program.cs"
+      },
+      "commands": {
+        "linux": "PZ_TUNNEL=\"csharp-process.portzero.local:80\" dotnet run --no-launch-profile",
+        "macos": "PZ_TUNNEL=\"csharp-process.portzero.local:80\" dotnet run --no-launch-profile",
+        "windows": "$env:PZ_TUNNEL = \"csharp-process.portzero.local:80\"; dotnet run --no-launch-profile"
+      }
+    },
+    {
+      "id": "csharp/docker",
+      "title": "C# Docker Compose",
+      "source_language": "csharp",
+      "language": "csharp",
+      "language_label": "C#",
+      "tools": [
+        "dotnet"
+      ],
+      "variant": "docker",
+      "variant_label": "Docker Compose",
+      "requires_docker": true,
+      "uses_docker_compose": true,
+      "path": "csharp/docker",
+      "domain": "csharp-docker.portzero.local:80",
+      "scripts": {
+        "linux": "csharp/docker/docker-compose.yml",
+        "macos": "csharp/docker/docker-compose.yml",
+        "windows": "csharp\\docker\\docker-compose.yml"
+      },
+      "commands": {
+        "linux": "PZ_TUNNEL=\"csharp-docker.portzero.local:80\" docker compose up --build",
+        "macos": "PZ_TUNNEL=\"csharp-docker.portzero.local:80\" docker compose up --build",
+        "windows": "$env:PZ_TUNNEL = \"csharp-docker.portzero.local:80\"; docker compose up --build"
+      }
+    }
+  ]
+}

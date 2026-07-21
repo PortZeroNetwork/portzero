@@ -1,0 +1,45 @@
+# Example GitHub Actions job running the SAME Playwright suite as local dev,
+# against a Port Zero tunnel. This is illustrative sample content for the
+# @portzero/playwright example — copy it into your own repo's
+# .github/workflows/ and adapt. It is intentionally NOT a live workflow here.
+#
+# Prerequisites in your repo:
+#   - the `portzero` CLI installed on the runner and logged in (for cloud
+#     tunnels) — a paid plan/team is required for cloud tunnels;
+#   - your app's compose file setting PZ_TUNNEL (and optionally PZ_HEALTH_PATH).
+
+name: e2e (example)
+
+on:
+  pull_request:
+
+jobs:
+  playwright:
+    runs-on: ubuntu-latest
+    env:
+      # One identity for the app in every environment.
+      PORTZERO_TUNNEL: web-{pr}.myteam.tunnel.portzero.cloud
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - run: npm ci
+      - run: npx playwright install --with-deps
+
+      # Start the portzero daemon (installed separately) so tunnels are
+      # discovered, then bring the stack up.
+      - run: portzero start
+      - run: docker compose up -d
+
+      # Gate on the tunnel being healthy before tests. The Playwright config's
+      # webServer block also does this, but doing it explicitly gives a clear
+      # early failure and lets later steps read the URL.
+      - run: portzero wait "$PORTZERO_TUNNEL" --healthy --timeout 120
+
+      # Optionally export every tunnel URL to later steps as PZ_URL_* .
+      - run: portzero env --github
+
+      - run: npx playwright test

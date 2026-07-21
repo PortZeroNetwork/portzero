@@ -1,0 +1,133 @@
+name: Playwright TLS Verify
+
+# task-66: verifies whether the PortZero local CA (client/crates/daemon/src/
+# tls/trust.rs, installed via `portzero trust install`) is trusted by
+# Chromium, Firefox, and WebKit *as downloaded by Playwright* — not as
+# system-installed browsers — over a real https://*.portzero.local tunnel on
+# a hosted ubuntu-latest runner. See testing/tls-verify/README.md and
+# docs/known-limitations.md.
+#
+# Builds portzero from source (rather than installing the latest release) so
+# this exercises the CA-install logic in the current tree.
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - '**'
+  # Also on every staging push, so a discovery/trust regression surfaces on
+  # the branch itself rather than only on the next PR (this job caught the
+  # discovery-loop wedge that PR-only runs mis-attributed to an innocent PR).
+  push:
+    branches:
+      - staging
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  playwright-tls-verify:
+    name: Playwright TLS verify (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build portzero (release)
+        run: cargo build --release -p portzero-cli
+
+      - name: Install NSS/p11-kit tooling (for browser + WebKit trust)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libnss3-tools p11-kit p11-kit-modules
+
+      - name: Generate + install the local CA
+        env:
+          PORTZERO_BIN: ${{ github.workspace }}/target/release/portzero
+        run: |
+          "$PORTZERO_BIN" trust generate
+          sudo -E "$PORTZERO_BIN" trust install
+
+      - name: Diagnose p11-kit trust extraction (debug aid, non-fatal)
+        run: |
+          ls -la /usr/libexec/p11-kit/ 2>&1 || echo "no /usr/libexec/p11-kit/ directory"
+          which trust || echo "trust binary not found"
+          sudo trust extract-compat 2>&1 || echo "trust extract-compat exited non-zero (see above)"
+        continue-on-error: true
+
+      - name: Start the daemon
+        env:
+          PORTZERO_BIN: ${{ github.workspace }}/target/release/portzero
+        # The simplest supported path (docs/privileges.md): run the daemon
+        # under sudo -E so the overlay (TUN + scoped resolver + embedded DNS)
+        # comes up fully privileged in one step, with $HOME preserved so its
+        # state directory matches what the unprivileged `portzero wait/url/
+        # status` calls below (run as the normal runner user) will read.
+        run: sudo -E "$PORTZERO_BIN" start --no-browser
+
+      - name: Start a plain HTTP backend behind an HTTPS tunnel
+        env:
+          PORTZERO_BIN: ${{ github.workspace }}/target/release/portzero
+        run: |
+          export PZ_TUNNEL="playwright-tls-check.portzero.local:443"
+          nohup python3 -m http.server 0 --directory testing/tls-verify/www \
+            > /tmp/tls-check-backend.log 2>&1 &
+          echo "backend pid: $!"
+
+      - name: Wait for the tunnel and resolve its URL
+        id: tunnel
+        env:
+          PORTZERO_BIN: ${{ github.workspace }}/target/release/portzero
+        run: |
+          "$PORTZERO_BIN" wait playwright-tls-check.portzero.local --healthy --timeout 30
+          url="$("$PORTZERO_BIN" url playwright-tls-check.portzero.local)"
+          echo "url=${url}" >> "$GITHUB_OUTPUT"
+          echo "Resolved: ${url}"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Playwright + browsers
+        working-directory: testing/tls-verify
+        run: |
+          npm install
+          npx playwright install --with-deps chromium firefox webkit
+
+      - name: Run the TLS trust check in all three engines
+        working-directory: testing/tls-verify
+        env:
+          PZ_TUNNEL_URL: ${{ steps.tunnel.outputs.url }}
+        run: npx playwright test
+
+      - name: portzero status (diagnostics)
+        if: always()
+        env:
+          PORTZERO_BIN: ${{ github.workspace }}/target/release/portzero
+        run: "$PORTZERO_BIN status || true"
+
+      - name: Collect logs
+        if: always()
+        run: |
+          mkdir -p /tmp/artifacts
+          cp -f "$HOME/.portzero/daemon/daemon.log" /tmp/artifacts/daemon.log 2>/dev/null || true
+          cp -f /tmp/tls-check-backend.log /tmp/artifacts/backend.log 2>/dev/null || true
+
+      - name: Upload daemon/backend logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: portzero-daemon-logs
+          path: /tmp/artifacts
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: testing/tls-verify/playwright-report/
+          if-no-files-found: ignore
+          retention-days: 14

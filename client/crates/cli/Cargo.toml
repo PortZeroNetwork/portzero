@@ -1,0 +1,112 @@
+[package]
+name = "portzero-cli"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Eliminate port conflicts in local dev by letting the OS pick random available ports, then forwarding them to virtual domains on a virtual NIC"
+repository = "https://github.com/PortZeroNetwork/portzero-local"
+homepage = "https://portzero.cloud"
+
+[[bin]]
+name = "portzero"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+portzero-daemon = { path = "../daemon" }
+portzero-domain = { path = "../domain" }
+portzero-proto = { path = "../../../proto" }
+dirs = "6"
+hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+rand = "0.8"
+toml_edit = "0.22"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[package.metadata.deb]
+name = "portzero"
+maintainer = "Port Zero Network <support@portzero.cloud>"
+copyright = "2024 Loum Technologies, LLC"
+license-file = ["../../../LICENSE", "0"]
+extended-description = """Eliminate port conflicts in your dev environment by letting the OS pick
+random available ports, then forwarding those ports to virtual domains
+on a virtual NIC. Run multiple branches simultaneously without clashing."""
+# libcap2-bin provides setcap, which the postinst uses to grant the daemon
+# CAP_NET_ADMIN + CAP_NET_BIND_SERVICE. It is a hard dependency (not a
+# recommendation) so an --no-install-recommends / minimal install still gets
+# setcap and never leaves the user to run `sudo setcap ...` by hand.
+depends = "$auto, libcap2-bin"
+recommends = "libnss3-tools"
+section = "net"
+priority = "optional"
+assets = [
+    ["target/release/portzero", "usr/local/bin/portzero", "755"],
+    ["target/release/portzero-tray", "usr/local/bin/portzero-tray", "755"],
+    ["target/release/portzero-app", "usr/local/bin/portzero-app", "755"],
+    ["../../../packaging/linux/portzero-daemon.service", "usr/lib/systemd/user/portzero-daemon.service", "644"],
+    ["../../../packaging/linux/portzero-tray.desktop", "etc/xdg/autostart/portzero-tray.desktop", "644"],
+    ["../../../packaging/linux/portzero.desktop", "usr/share/applications/portzero.desktop", "644"],
+    ["../../../packaging/linux/icons/portzero.png", "usr/share/icons/hicolor/512x512/apps/portzero.png", "644"],
+]
+maintainer-scripts = "../../../packaging/linux/deb"
+
+[package.metadata.generate-rpm]
+name = "portzero"
+license = "GPL-3.0-or-later"
+summary = "Eliminate port conflicts in your dev environment by letting the OS pick random available ports, then forwarding those ports to virtual domains on a virtual NIC. Run multiple branches simultaneously without clashing."
+url = "https://portzero.cloud"
+vendor = "Loum Technologies, LLC"
+release = "1"
+assets = [
+    { source = "../../../target/release/portzero", dest = "/usr/local/bin/portzero", mode = "0755" },
+    { source = "../../../target/release/portzero-tray", dest = "/usr/local/bin/portzero-tray", mode = "0755" },
+    { source = "../../../target/release/portzero-app", dest = "/usr/local/bin/portzero-app", mode = "0755" },
+    { source = "../../../packaging/linux/portzero-daemon.service", dest = "/usr/lib/systemd/user/portzero-daemon.service", mode = "0644" },
+    { source = "../../../packaging/linux/portzero-tray.desktop", dest = "/etc/xdg/autostart/portzero-tray.desktop", mode = "0644" },
+    { source = "../../../packaging/linux/portzero.desktop", dest = "/usr/share/applications/portzero.desktop", mode = "0644" },
+    { source = "../../../packaging/linux/icons/portzero.png", dest = "/usr/share/icons/hicolor/512x512/apps/portzero.png", mode = "0644" },
+]
+post_install_script = """
+if command -v setcap >/dev/null 2>&1; then
+    setcap 'cap_net_admin,cap_net_bind_service+eip' /usr/local/bin/portzero 2>/dev/null || true
+fi
+if ! grep -q '# portzero-local' /etc/hosts 2>/dev/null; then
+    echo '10.254.0.2 portzero.local # portzero-local' >> /etc/hosts
+fi
+systemctl daemon-reload 2>/dev/null || true
+
+# Get the daemon + tray running now, without waiting for the next login (see
+# packaging/linux/deb/postinst for the full rationale; kept in sync here).
+target_user="${SUDO_USER:-}"
+if [ -z "$target_user" ] || [ "$target_user" = "root" ]; then
+    target_user="$(logname 2>/dev/null || true)"
+fi
+if [ -n "$target_user" ] && [ "$target_user" != "root" ] && command -v runuser >/dev/null 2>&1; then
+    target_uid="$(id -u "$target_user" 2>/dev/null || true)"
+    bus_socket="/run/user/${target_uid}/bus"
+    if [ -n "$target_uid" ] && [ -S "$bus_socket" ]; then
+        if command -v systemctl >/dev/null 2>&1; then
+            runuser -u "$target_user" -- env XDG_RUNTIME_DIR="/run/user/${target_uid}" DBUS_SESSION_BUS_ADDRESS="unix:path=${bus_socket}" systemctl --user enable --now portzero-daemon.service >/dev/null 2>&1 || true
+        fi
+        runuser -u "$target_user" -- env XDG_RUNTIME_DIR="/run/user/${target_uid}" DBUS_SESSION_BUS_ADDRESS="unix:path=${bus_socket}" setsid /usr/local/bin/portzero-tray >/dev/null 2>&1 </dev/null &
+    fi
+fi
+"""
+pre_uninstall_script = """
+systemctl --user disable --now portzero-daemon 2>/dev/null || true
+# Stop any running tray companion; its autostart entry is removed with the package.
+pkill -x portzero-tray 2>/dev/null || true
+sed -i '/# portzero-local/d' /etc/hosts 2>/dev/null || true
+systemctl daemon-reload 2>/dev/null || true
+"""
+
+# libcap provides setcap, used by post_install_script to grant the daemon
+# CAP_NET_ADMIN + CAP_NET_BIND_SERVICE. Required (not optional) so setcap is
+# always present and the user never has to run `sudo setcap ...` by hand.
+[package.metadata.generate-rpm.requires]
+libcap = "*"

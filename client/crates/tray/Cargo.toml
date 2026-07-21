@@ -1,0 +1,38 @@
+[package]
+name = "portzero-tray"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "System-tray companion for the PortZero local tunnel daemon: shows daemon health, surfaces issues, and offers one-click start/restart/stop and HTTPS control."
+repository = "https://github.com/PortZeroNetwork/portzero-local"
+homepage = "https://portzero.cloud"
+
+[[bin]]
+name = "portzero-tray"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+portzero-daemon = { path = "../daemon" }
+# Shared launcher for the PortZero desktop app (locate + spawn `portzero-app`),
+# used by the tray's "Open PortZero" actions.
+portzero-domain = { path = "../domain" }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+# Linux drives the tray from a pure-Rust ksni StatusNotifierItem service (SNI
+# over D-Bus via zbus). No GTK / libayatana-appindicator / libxdo — so the tray
+# adds no C GUI-toolkit dependency to the Linux packages. The `blocking` feature
+# gives us a synchronous handle so the tray needs no async runtime of its own.
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3", features = ["blocking"] }
+
+# Windows and macOS drive the tray from a winit event loop, which owns the
+# native message pump / run loop the tray-icon crate (and its muda menu) need.
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+tray-icon = "0.19"
+muda = "0.15"
+winit = "0.30"

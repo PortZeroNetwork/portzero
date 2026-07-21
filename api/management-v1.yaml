@@ -1,0 +1,379 @@
+openapi: 3.1.0
+info:
+  title: portzero Management API
+  description: |-
+    HTTP management API for the portzero overlay network daemon, reachable at `http://portzero.local` through the virtual NIC.
+
+    ## Identity mechanism
+
+    This API uses **no authentication tokens**. The daemon identifies the calling process by inspecting the TCP source port of each inbound connection and resolving it to a PID via OS-level socket tables:
+
+    - **Linux** — `/proc/net/tcp` and `/proc/net/tcp6`
+    - **macOS** — `sysctl` / `libproc`
+    - **Windows** — `GetExtendedTcpTable`
+
+    Clients must never include a `pid` field in request bodies; the daemon derives it from the connection. If the daemon cannot resolve the source port to a PID it returns `500 caller_unidentifiable`.
+
+    ## Port verification
+
+    When a process registers port→domain mappings, the daemon independently verifies that the resolved PID is actually listening on each claimed `local_port`. Claims that fail verification are rejected with `422 port_not_listening`.
+
+    ## Auto-deregistration
+
+    When the daemon detects that a registered PID has exited, it automatically removes all mappings for that PID. Processes may also call `DELETE /v1/register` to deregister explicitly (e.g., on graceful shutdown).
+  license:
+    name: GPL-3.0-or-later
+    identifier: GPL-3.0-or-later
+  version: 1.0.0
+servers:
+- url: http://portzero.local
+  description: portzero overlay network — reachable via the virtual NIC
+paths:
+  /v1/daemon/status:
+    get:
+      tags:
+      - management
+      summary: Return daemon version and status
+      description: Returns the running portzero daemon version and coarse status for local applications calling `http://portzero.local`. The `registrations` summary covers local API registrations, which are an **unstable** feature.
+      operationId: getDaemonStatus
+      responses:
+        '200':
+          description: Daemon version and status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DaemonStatusResponse'
+              example:
+                cloud_connected: false
+                daemon_pid: 12345
+                https:
+                  enabled: true
+                  passthrough_port_443: true
+                  redirect_port_80: false
+                overlay_active: true
+                registrations:
+                  count: 2
+                  feature_stability: unstable
+                status: running
+                version: 0.1.0
+  /v1/register:
+    post:
+      tags:
+      - management
+      summary: Register (or replace) port→domain mappings for this process
+      description: |-
+        Registers one or more `local_port` → `domain` mappings for the calling process. If the process already has registrations they are **replaced** atomically by this call.
+
+        The daemon resolves the caller's PID from the TCP source port of this connection, then verifies that the PID is listening on every `local_port` listed. Any port that fails verification causes the entire request to be rejected. Domains must be non-reserved subdomains of `portzero.local`; cloud tunnel domains cannot be registered through this API.
+      operationId: registerPorts
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+            example:
+              ports:
+              - domain: api.myapp.portzero.local
+                local_port: 8080
+              - domain: metrics.myapp.portzero.local
+                local_port: 9090
+        required: true
+      responses:
+        '200':
+          description: Mappings registered successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegisterResponse'
+              example:
+                pid: 12345
+                registered: 2
+        '422':
+          description: One or more claimed ports could not be verified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                detail: PID 12345 is not listening on port 8080
+                error: port_not_listening
+        '500':
+          description: Daemon could not identify the calling process
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                detail: could not resolve source port 54321 to a PID
+                error: caller_unidentifiable
+      x-portzero-feature-stability: unstable
+    delete:
+      tags:
+      - management
+      summary: Deregister all port→domain mappings for this process
+      description: Removes all port→domain mappings previously registered by the calling process. The daemon also performs automatic deregistration when it detects that a PID has exited, so explicit deregistration on graceful shutdown is optional but recommended.
+      operationId: deregisterPorts
+      responses:
+        '200':
+          description: Mappings deregistered successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeregisterResponse'
+              example:
+                deregistered: true
+                pid: 12345
+        '404':
+          description: No registrations found for this process
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                detail: PID 12345 has no active registration
+                error: not_registered
+        '500':
+          description: Daemon could not identify the calling process
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                detail: could not resolve source port 54321 to a PID
+                error: caller_unidentifiable
+      x-portzero-feature-stability: unstable
+  /v1/status:
+    get:
+      tags:
+      - management
+      summary: Return current port→domain registrations for this process
+      description: Returns the port→domain mappings currently registered for the calling process. If the process has no active registrations, `404` is returned.
+      operationId: getStatus
+      responses:
+        '200':
+          description: Current registrations for this process
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+              example:
+                pid: 12345
+                ports:
+                - domain: api.myapp.portzero.local
+                  local_port: 8080
+                - domain: metrics.myapp.portzero.local
+                  local_port: 9090
+        '404':
+          description: No registrations found for this process
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                detail: PID 12345 has no active registration
+                error: not_registered
+        '500':
+          description: Daemon could not identify the calling process
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                detail: could not resolve source port 54321 to a PID
+                error: caller_unidentifiable
+      x-portzero-feature-stability: unstable
+components:
+  schemas:
+    ApiRegistrationsStatus:
+      type: object
+      required:
+      - feature_stability
+      - count
+      properties:
+        count:
+          type: integer
+          description: Number of active port registrations created through the local API.
+          example: 2
+          minimum: 0
+        feature_stability:
+          type: string
+          description: Stability marker for the local API registration feature.
+          example: unstable
+    DaemonStatusResponse:
+      type: object
+      required:
+      - version
+      - status
+      - overlay_active
+      - cloud_connected
+      - https
+      - registrations
+      properties:
+        cloud_connected:
+          type: boolean
+          description: Whether the daemon is connected for cloud tunnels.
+          example: false
+        daemon_pid:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          description: PID read from the daemon state directory, when available.
+          example: 12345
+          minimum: 0
+        https:
+          $ref: '#/components/schemas/HttpsStatus'
+          description: HTTPS behavior for *.portzero.local overlay routes.
+        overlay_active:
+          type: boolean
+          description: Whether the local overlay is active.
+          example: true
+        registrations:
+          $ref: '#/components/schemas/ApiRegistrationsStatus'
+          description: Summary of local API registrations. This feature is unstable.
+        status:
+          type: string
+          description: Coarse daemon state for local app health checks.
+          example: running
+        version:
+          type: string
+          description: Version of the running portzero daemon.
+          example: 0.1.0
+    DeregisterResponse:
+      type: object
+      required:
+      - pid
+      - deregistered
+      properties:
+        deregistered:
+          type: boolean
+          description: Always `true` on a 200 response.
+          example: true
+        pid:
+          type: integer
+          format: int32
+          description: PID the daemon resolved from the connection's TCP source port.
+          example: 12345
+          minimum: 0
+    ErrorResponse:
+      type: object
+      required:
+      - error
+      - detail
+      properties:
+        detail:
+          type: string
+          description: Human-readable message with additional detail.
+        error:
+          type: string
+          description: Machine-readable error code.
+          examples:
+          - caller_unidentifiable
+          - port_not_listening
+          - not_registered
+    HttpsStatus:
+      type: object
+      required:
+      - enabled
+      - redirect_port_80
+      - passthrough_port_443
+      properties:
+        enabled:
+          type: boolean
+          description: Whether daemon-managed HTTPS is enabled for plaintext backends exposed on port 80.
+          example: true
+        passthrough_port_443:
+          type: boolean
+          description: Whether TLS passthrough is enabled for HTTPS backends exposed on port 443.
+          example: true
+        redirect_port_80:
+          type: boolean
+          description: Whether HTTP port 80 requests are redirected to HTTPS.
+          example: false
+    PortRegistration:
+      type: object
+      description: A single port registration entry.
+      required:
+      - local_port
+      - domain
+      properties:
+        domain:
+          type: string
+          description: |-
+            Full local-overlay domain to map to this port. It must be a non-reserved
+            subdomain of `portzero.local`.
+          example: myservice.portzero.local
+        local_port:
+          type: integer
+          format: int32
+          description: |-
+            The local TCP port this process is listening on. The daemon verifies
+            the calling PID is actually bound to this port before accepting the
+            registration.
+          example: 8080
+          minimum: 1
+    RegisterRequest:
+      type: object
+      required:
+      - ports
+      properties:
+        ports:
+          type: array
+          items:
+            $ref: '#/components/schemas/PortRegistration'
+          description: |-
+            One or more port→domain mappings to register. All existing
+            registrations for this PID are replaced atomically.
+          maxItems: 64
+          minItems: 1
+    RegisterResponse:
+      type: object
+      required:
+      - pid
+      - registered
+      properties:
+        pid:
+          type: integer
+          format: int32
+          description: PID the daemon resolved from the connection's TCP source port.
+          example: 12345
+          minimum: 0
+        registered:
+          type: integer
+          description: Number of port→domain mappings that were successfully stored.
+          example: 2
+          minimum: 0
+    StatusResponse:
+      type: object
+      required:
+      - pid
+      - ports
+      properties:
+        pid:
+          type: integer
+          format: int32
+          description: PID the daemon resolved from the connection's TCP source port.
+          example: 12345
+          minimum: 0
+        ports:
+          type: array
+          items:
+            $ref: '#/components/schemas/PortRegistration'
+          description: Port→domain mappings currently registered for this process.
+  securitySchemes:
+    TcpSourcePortIdentity:
+      type: apiKey
+      in: header
+      name: X-Portzero-Tcp-Identity
+      description: |-
+        **Not a real header.** portzero does not use tokens or headers for authentication.
+
+        Identity is established by the daemon resolving the TCP source port of the connection to a PID using OS-level socket tables (`/proc/net/tcp` on Linux, `libproc` on macOS, `GetExtendedTcpTable` on Windows). Clients must send no auth header.
+
+        This entry exists only so that OpenAPI tooling can document the security model. SDK generators should **not** inject this header.
+security:
+- TcpSourcePortIdentity: []
+tags:
+- name: management
+  description: Port/domain registration for local processes
+x-portzero-sdk-note: SDK generation should use `http://portzero.local` as the base URL. No auth headers are needed — the daemon identifies the caller by the TCP source port of the connection. Do not inject Authorization or X-Api-Key headers.

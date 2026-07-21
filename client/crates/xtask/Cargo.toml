@@ -1,0 +1,13 @@
+[package]
+name = "portzero-xtask"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+publish = false
+
+[[bin]]
+name = "check-file-size-budget"
+path = "src/bin/check_file_size_budget.rs"
+
+[dependencies]
+anyhow = "1"

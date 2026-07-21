@@ -1,0 +1,1294 @@
+name: Release
+# Per-run title in the Actions list (one file serves both channels).
+run-name: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && 'Stable Release' || (github.event_name == 'workflow_dispatch' && inputs.channel == 'stable') && 'Stable Release' || 'Unstable Release' }}
+
+# Heroku-style, tag-addressed release model (see docs/developers/release-conventions.md):
+#
+#   * STABLE — immutable `vX.Y.Z` tag is the release of record. Trigger Stable
+#     Release (trigger-stable-release.yml) stamps the tag behind the production
+#     environment gate; this workflow then builds SIGNED installers.
+#
+#   * UNSTABLE — every push to `staging` automatically builds UNSIGNED installers
+#     and publishes a GitHub Release that is never "latest" (`prerelease: true`).
+#     Manual workflow_dispatch with channel=unstable is also supported.
+#
+#   * channel=stable workflow_dispatch re-publishes an existing vX.Y.Z tag
+#     (Trigger Stable Release does this for you on bump=none).
+#
+# Call channels **stable** / **unstable** in prose — not "edge" or "prerelease".
+# GitHub's prerelease flag and the portzero-edge Homebrew formula are mechanics.
+on:
+  push:
+    branches:
+      - staging
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: 'unstable = unsigned testing build off staging. stable = re-publish the vX.Y.Z tag this run is dispatched at (used by Trigger Stable Release, bump=none).'
+        type: choice
+        default: unstable
+        options:
+          - unstable
+          - stable
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    name: Determine Version
+    # softprops creates vX.Y.Z-rc.N tags for unstable releases; ignore those
+    # tag-push re-entries (would otherwise look like a broken stable run).
+    if: ${{ !(github.event_name == 'push' && contains(github.ref_name, '-')) }}
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      formula: ${{ steps.version.outputs.formula }}
+      msi_version: ${{ steps.version.outputs.msi_version }}
+      rpm_version: ${{ steps.version.outputs.rpm_version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Generate version
+        id: version
+        run: |
+          # Resolve channel: stable (tag / re-publish) vs unstable (staging push / manual).
+          CHANNEL="unstable"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            case "$GITHUB_REF" in
+              refs/tags/v*) CHANNEL="stable" ;;
+              refs/heads/staging) CHANNEL="unstable" ;;
+              *)
+                echo "::error::unexpected push ref $GITHUB_REF (expected staging branch or vX.Y.Z tag)." >&2
+                exit 1
+                ;;
+            esac
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            CHANNEL="${{ inputs.channel }}"
+            # Legacy alias if anything still dispatches channel=edge.
+            if [ "$CHANNEL" = "edge" ]; then CHANNEL="unstable"; fi
+          fi
+          echo "channel=${CHANNEL}"
+
+          if [ "$CHANNEL" = "stable" ]; then
+            # Stable build: the version IS the vX.Y.Z tag this run is for —
+            # either the tag push (stamped by Trigger Stable Release), or a
+            # channel=stable re-publish dispatch at that tag. Never recompute.
+            TAG="${GITHUB_REF_NAME}"
+            case "$GITHUB_REF" in
+              refs/tags/v*-*)
+                echo "::error::channel=stable cannot re-publish an unstable tag ($GITHUB_REF_NAME)." >&2
+                exit 1
+                ;;
+              refs/tags/v[0-9]*.[0-9]*.[0-9]*) : ;;
+              *)
+                echo "::error::channel=stable must run at an existing vX.Y.Z tag ref (got $GITHUB_REF). Use Trigger Stable Release with bump=none, or pick the tag in the Run-workflow ref dropdown." >&2
+                exit 1
+                ;;
+            esac
+            VERSION="${TAG#v}"
+            echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+            echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "formula=portzero" >> "$GITHUB_OUTPUT"
+          else
+            # Unstable channel: every push to staging (or manual dispatch).
+            # BASE is derived from the latest stable tag + tip commit markers.
+            # Only stable tags (vX.Y.Z) drive the auto-increment; unstable tags
+            # (vX.Y.Z-rc.N) are excluded so they never perturb the next stable.
+            LATEST_TAG=$(git tag -l "v[0-9]*.[0-9]*.[0-9]*" | grep -v -- '-' | sort -V | tail -1)
+            LATEST_TAG="${LATEST_TAG:-v0.0.0}"
+
+            MAJOR=$(echo "$LATEST_TAG" | sed 's/^v//' | cut -d. -f1)
+            MINOR=$(echo "$LATEST_TAG" | cut -d. -f2)
+            PATCH=$(echo "$LATEST_TAG" | cut -d. -f3)
+
+            COMMIT_MSG=$(git log -1 --pretty=%B)
+            if echo "$COMMIT_MSG" | grep -qE "BREAKING CHANGE|\[major\]"; then
+              MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0
+            elif echo "$COMMIT_MSG" | grep -qE "^feat(\([^)]+\))?:|\[minor\]"; then
+              MINOR=$((MINOR + 1)); PATCH=0
+            else
+              PATCH=$((PATCH + 1))
+            fi
+
+            # SemVer prerelease suffix keeps it ordered *below* the eventual
+            # stable BASE (rc.N < BASE) for both GitHub and the CLI's own version
+            # comparator. github.run_number makes successive prereleases
+            # monotonic and unique.
+            VERSION="${MAJOR}.${MINOR}.${PATCH}-rc.${GITHUB_RUN_NUMBER}"
+            echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+            echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "formula=portzero-edge" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Neither RPM nor MSI version fields accept SemVer prerelease syntax
+          # (a bare '-'), so derive package-format-safe versions from VERSION
+          # here rather than teaching every downstream job the same rules.
+          BASE_VERSION="${VERSION%%-*}"
+          if [[ "$VERSION" == *-* ]]; then
+            # rpm forbids '-' but treats '~' as a "sorts before" separator,
+            # which is exactly the semantics of a prerelease suffix.
+            RPM_VERSION="${VERSION//-/\~}"
+            # WiX ProductVersion must be a bare x.x.x.x integer quad; fold the
+            # prerelease info into the 4th field via the run number so
+            # successive unstable builds still install as upgrades.
+            MSI_VERSION="${BASE_VERSION}.${GITHUB_RUN_NUMBER}"
+          else
+            RPM_VERSION="$VERSION"
+            MSI_VERSION="${BASE_VERSION}.0"
+          fi
+          echo "rpm_version=${RPM_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "msi_version=${MSI_VERSION}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.archive_name }}
+    needs: version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Note: aarch64/i686 Linux and cross-compiled targets do not build
+          # portzero-app — Tauri's cross-compilation story for GTK/webkit
+          # targets is not set up here, and the amd64 Linux archive (which
+          # already carries portzero-app) is what packaging (deb/rpm) uses.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            bins: portzero,portzero-tray,portzero-app
+            archive_ext: tar.gz
+            archive_name: portzero-linux-amd64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            bins: portzero
+            cross: true
+            archive_ext: tar.gz
+            archive_name: portzero-linux-arm64
+          - target: i686-unknown-linux-gnu
+            os: ubuntu-latest
+            bins: portzero
+            cross: true
+            archive_ext: tar.gz
+            archive_name: portzero-linux-x86
+          - target: x86_64-apple-darwin
+            os: macos-15
+            bins: portzero,portzero-tray,portzero-app
+            archive_ext: tar.gz
+            archive_name: portzero-darwin-amd64
+          - target: aarch64-apple-darwin
+            os: macos-15
+            bins: portzero,portzero-tray,portzero-app
+            archive_ext: tar.gz
+            archive_name: portzero-darwin-arm64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            bins: portzero,portzero-tray,portzero-app
+            archive_ext: zip
+            archive_name: portzero-windows-amd64
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set CLI package version
+        run: scripts/set-cli-version.sh "${{ needs.version.outputs.version }}"
+        shell: bash
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      # Only jobs that build portzero-app need Node/webkit — the aarch64/i686
+      # Linux cross-compiled legs above don't carry it in their `bins:` list.
+      - name: Set up Node
+        if: contains(matrix.bins, 'portzero-app')
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/crates/app/ui/package-lock.json
+
+      - name: Install Linux webkit build deps (for portzero-app)
+        if: contains(matrix.bins, 'portzero-app') && runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Build portzero-app frontend
+        if: contains(matrix.bins, 'portzero-app')
+        working-directory: client/crates/app/ui
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build
+        env:
+          PKG_CONFIG_SYSROOT_DIR: ${{ matrix.cross && '/' || '' }}
+        run: |
+          build_cmd="cargo"
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            build_cmd="cross"
+          fi
+
+          IFS=',' read -ra BINS <<< "${{ matrix.bins }}"
+          bin_flags=""
+          for bin in "${BINS[@]}"; do
+            bin_flags="$bin_flags --bin $bin"
+          done
+
+          $build_cmd build --release --target ${{ matrix.target }} $bin_flags
+        shell: bash
+
+      # ---------------------------------------------------------------------
+      # macOS codesigning + notarization — OPTIONAL and strictly secret-gated.
+      #
+      # With the MACOS_SIGNING_* / MACOS_NOTARY_* secrets unset (the default
+      # today) every step below is a no-op and the darwin tarball is the exact
+      # same UNSIGNED artifact this workflow has always produced. Set the
+      # secrets to opt in — nothing about the current CI behavior changes until
+      # you do. GitHub Actions forbids `secrets.*` in a step `if:`, so a shell
+      # gate exposes them via `env:` and records the decision as step outputs.
+      # Runs on GitHub-hosted macos-15 as the runner user (no sudo / no host
+      # mutation). See docs/developers/macos-signing.md.
+      # ---------------------------------------------------------------------
+      - name: Check macOS signing secrets
+        id: macos_signing
+        if: contains(matrix.target, 'apple-darwin')
+        shell: bash
+        env:
+          MACOS_SIGNING_CERT_P12: ${{ secrets.MACOS_SIGNING_CERT_P12 }}
+          MACOS_SIGNING_CERT_PASSWORD: ${{ secrets.MACOS_SIGNING_CERT_PASSWORD }}
+          MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          MACOS_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+          MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+        run: |
+          sign=false
+          notarize=false
+          if [ -n "$MACOS_SIGNING_CERT_P12" ] && [ -n "$MACOS_SIGNING_CERT_PASSWORD" ]; then
+            sign=true
+          fi
+          if [ "$sign" = true ] \
+            && [ -n "$MACOS_NOTARY_APPLE_ID" ] \
+            && [ -n "$MACOS_NOTARY_TEAM_ID" ] \
+            && [ -n "$MACOS_NOTARY_PASSWORD" ]; then
+            notarize=true
+          fi
+          echo "sign=$sign" >> "$GITHUB_OUTPUT"
+          echo "notarize=$notarize" >> "$GITHUB_OUTPUT"
+          echo "macOS codesigning=${sign}, notarization=${notarize}"
+
+      - name: Codesign macOS binaries (optional, secret-gated)
+        if: steps.macos_signing.outputs.sign == 'true'
+        shell: bash
+        env:
+          MACOS_SIGNING_CERT_P12: ${{ secrets.MACOS_SIGNING_CERT_P12 }}
+          MACOS_SIGNING_CERT_PASSWORD: ${{ secrets.MACOS_SIGNING_CERT_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # Import the Developer ID Application cert into an ephemeral, throwaway
+          # keychain, sign each binary with the hardened runtime, then delete it.
+          KEYCHAIN="$RUNNER_TEMP/portzero-signing.keychain-db"
+          CERT_PATH="$RUNNER_TEMP/portzero-cert.p12"
+
+          echo "$MACOS_SIGNING_CERT_P12" | base64 --decode > "$CERT_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$CERT_PATH" -P "$MACOS_SIGNING_CERT_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          # Make the ephemeral keychain searchable without dropping the defaults.
+          # The existing keychain list is intentionally word-split into args.
+          # shellcheck disable=SC2046
+          security list-keychain -d user -s "$KEYCHAIN" \
+            $(security list-keychains -d user | sed s/\"//g)
+
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | awk -F'"' 'NR==1{print $2}')
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::No codesigning identity found in MACOS_SIGNING_CERT_P12." >&2
+            security delete-keychain "$KEYCHAIN"
+            rm -f "$CERT_PATH"
+            exit 1
+          fi
+
+          IFS=',' read -ra BINS <<< "${{ matrix.bins }}"
+          for bin in "${BINS[@]}"; do
+            codesign --force --options runtime --timestamp \
+              --sign "$IDENTITY" \
+              "target/${{ matrix.target }}/release/$bin"
+            codesign --verify --strict --verbose=2 \
+              "target/${{ matrix.target }}/release/$bin"
+          done
+
+          security delete-keychain "$KEYCHAIN"
+          rm -f "$CERT_PATH"
+
+      - name: Notarize macOS binaries (optional, secret-gated)
+        if: steps.macos_signing.outputs.notarize == 'true'
+        shell: bash
+        env:
+          MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          MACOS_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+          MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # Submit the signed binaries to Apple's notary service. Bare CLI
+          # binaries can't be stapled, so notarization registers their signed
+          # hashes with Apple; Gatekeeper verifies online on first launch.
+          NOTARIZE_DIR="$RUNNER_TEMP/notarize"
+          NOTARIZE_ZIP="$RUNNER_TEMP/portzero-notarize.zip"
+          rm -rf "$NOTARIZE_DIR" "$NOTARIZE_ZIP"
+          mkdir -p "$NOTARIZE_DIR"
+
+          IFS=',' read -ra BINS <<< "${{ matrix.bins }}"
+          for bin in "${BINS[@]}"; do
+            cp "target/${{ matrix.target }}/release/$bin" "$NOTARIZE_DIR/"
+          done
+          /usr/bin/ditto -c -k --keepParent "$NOTARIZE_DIR" "$NOTARIZE_ZIP"
+
+          xcrun notarytool submit "$NOTARIZE_ZIP" \
+            --apple-id "$MACOS_NOTARY_APPLE_ID" \
+            --team-id "$MACOS_NOTARY_TEAM_ID" \
+            --password "$MACOS_NOTARY_PASSWORD" \
+            --wait
+          rm -rf "$NOTARIZE_DIR" "$NOTARIZE_ZIP"
+
+      - name: Package (Unix)
+        if: matrix.archive_ext == 'tar.gz'
+        run: |
+          staging="${{ matrix.archive_name }}"
+          mkdir -p "$staging"
+
+          IFS=',' read -ra BINS <<< "${{ matrix.bins }}"
+          for bin in "${BINS[@]}"; do
+            cp "target/${{ matrix.target }}/release/$bin" "$staging/"
+          done
+
+          tar czf "$staging.tar.gz" "$staging"
+
+      - name: Cache wintun
+        if: matrix.archive_ext == 'zip'
+        uses: actions/cache@v4
+        with:
+          path: wintun.zip
+          key: wintun-0.14.1
+
+      - name: Package (Windows)
+        if: matrix.archive_ext == 'zip'
+        shell: pwsh
+        run: |
+          $staging = "${{ matrix.archive_name }}"
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          foreach ($bin in "${{ matrix.bins }}".Split(",")) {
+            Copy-Item "target\${{ matrix.target }}\release\$bin.exe" "$staging\"
+          }
+
+          if (-not (Test-Path "wintun.zip")) {
+            $maxRetries = 3
+            for ($i = 1; $i -le $maxRetries; $i++) {
+              try {
+                Invoke-WebRequest `
+                  -Uri "https://www.wintun.net/builds/wintun-0.14.1.zip" `
+                  -OutFile "wintun.zip" `
+                  -TimeoutSec 60
+                break
+              } catch {
+                if ($i -eq $maxRetries) { throw }
+                Write-Host "Download attempt $i failed, retrying in 15s..."
+                Start-Sleep -Seconds 15
+              }
+            }
+          }
+          Expand-Archive -Path "wintun.zip" -DestinationPath "wintun" -Force
+          Copy-Item "wintun\wintun\bin\amd64\wintun.dll" "$staging\"
+
+          $vswhere = Join-Path "${env:ProgramFiles(x86)}" "Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) {
+            throw "vswhere.exe not found; cannot locate VC++ redistributable DLLs"
+          }
+
+          $vsPath = & $vswhere `
+            -latest `
+            -products * `
+            -requiresAny `
+            -requires Microsoft.VisualStudio.Component.VC.Redist.14.Latest Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          if (-not $vsPath) {
+            throw "Visual Studio installation with VC++ redistributable files not found"
+          }
+
+          $redistRoot = Join-Path $vsPath "VC\Redist\MSVC"
+          if (-not (Test-Path $redistRoot)) {
+            throw "VC++ redistributable root not found under $vsPath"
+          }
+
+          $redistVersionDir = Get-ChildItem `
+              -Directory `
+              -Path $redistRoot |
+            Where-Object {
+              $_.Name -match '^\d+\.' -and
+              (Test-Path (Join-Path $_.FullName "x64"))
+            } |
+            Sort-Object { [version]$_.Name } -Descending |
+            Select-Object -First 1
+          if (-not $redistVersionDir) {
+            throw "VC++ redistributable version directory with an x64 layout not found under $redistRoot"
+          }
+
+          Write-Host "VC++ redist root: $redistRoot"
+          Write-Host "Selected VC++ redist version directory: $($redistVersionDir.FullName)"
+          $x64Root = Join-Path $redistVersionDir.FullName "x64"
+          if (Test-Path $x64Root) {
+            Write-Host "x64 layout under ${x64Root}:"
+            Get-ChildItem -Path $x64Root -Force |
+              Select-Object Mode, Length, Name |
+              Format-Table -AutoSize |
+              Out-String -Width 200 |
+              Write-Host
+          } else {
+            Write-Host "x64 layout not found under $x64Root"
+          }
+
+          $requiredDlls = @(
+            "concrt140.dll",
+            "msvcp140.dll",
+            "msvcp140_1.dll",
+            "msvcp140_2.dll",
+            "msvcp140_atomic_wait.dll",
+            "msvcp140_codecvt_ids.dll",
+            "vccorlib140.dll",
+            "vcruntime140.dll",
+            "vcruntime140_1.dll",
+            "vcruntime140_threads.dll"
+          )
+
+          foreach ($dllName in $requiredDlls) {
+            $dll = Get-ChildItem `
+              -Path $x64Root `
+              -Recurse `
+              -File `
+              -Filter $dllName |
+              Sort-Object FullName -Descending |
+              Select-Object -First 1
+
+            if (-not $dll) {
+              throw "VC++ x64 redistributable DLL not found under ${x64Root}: $dllName"
+            }
+
+            Copy-Item $dll.FullName "$staging\" -Force
+          }
+
+      - name: Create Windows ZIP
+        # Unsigned here regardless of channel — signing needs the `production`
+        # environment (job-level only in Actions), which this matrix job can't
+        # scope to just the Windows leg without gating every platform's build
+        # behind it. The `sign-windows-zip` job re-signs and overwrites this
+        # artifact for genuine vX.Y.Z tag builds; unstable builds ship as-is.
+        if: matrix.archive_ext == 'zip'
+        shell: pwsh
+        run: |
+          $staging = "${{ matrix.archive_name }}"
+          Compress-Archive -Path "$staging" -DestinationPath "$staging.zip"
+
+      - name: Compute SHA256 (macOS)
+        if: contains(matrix.target, 'apple-darwin')
+        run: |
+          shasum -a 256 "${{ matrix.archive_name }}.tar.gz" | awk '{print $1}' \
+            > "${{ matrix.archive_name }}.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: ${{ matrix.archive_name }}
+          path: ${{ matrix.archive_name }}.${{ matrix.archive_ext }}
+
+      - name: Upload SHA256 (macOS)
+        if: contains(matrix.target, 'apple-darwin')
+        uses: actions/upload-artifact@v5
+        with:
+          name: sha256-${{ matrix.archive_name }}
+          path: ${{ matrix.archive_name }}.sha256
+
+  sign-windows-zip:
+    name: Sign Windows Zip Binaries
+    needs: [version, build]
+    # Only a genuine vX.Y.Z tag build goes through Artifact Signing — unstable
+    # builds (staging push / workflow_dispatch) ship unsigned for testing. This
+    # job (unlike the `build` matrix) covers only the Windows leg, so gating it
+    # on the `production` environment doesn't hold up macOS/Linux builds too.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    environment: production
+    steps:
+      - name: Download Windows zip artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: portzero-windows-amd64
+
+      - name: Extract zip contents
+        shell: pwsh
+        run: |
+          Expand-Archive -Path "portzero-windows-amd64.zip" -DestinationPath "." -Force
+
+      - name: Azure login for Artifact Signing
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign Windows EXE
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+          # Sign the CLI, the system-tray companion, and the desktop app so
+          # the tray (which autostarts at login) and the app are not flagged
+          # by SmartScreen.
+          files-folder: ${{ github.workspace }}\portzero-windows-amd64
+          files-folder-filter: portzero*.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Verify Windows EXE signature
+        shell: pwsh
+        run: |
+          function Get-SigntoolPath {
+            $cmd = Get-Command signtool.exe -ErrorAction SilentlyContinue
+            if ($cmd) {
+              return $cmd.Source
+            }
+
+            $sdkRoots = @(
+              "${env:ProgramFiles(x86)}\Windows Kits\10\bin",
+              "${env:ProgramFiles(x86)}\Windows Kits\10\App Certification Kit"
+            )
+
+            foreach ($root in $sdkRoots) {
+              if (-not (Test-Path $root)) {
+                continue
+              }
+
+              $candidate = Get-ChildItem -Path $root -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
+                Select-Object -First 1
+              if ($candidate) {
+                return $candidate.FullName
+              }
+            }
+
+            throw "signtool.exe not found on PATH or in the Windows SDK install"
+          }
+
+          $signtool = Get-SigntoolPath
+          foreach ($name in @("portzero.exe", "portzero-tray.exe", "portzero-app.exe")) {
+            $exe = Resolve-Path ".\portzero-windows-amd64\$name"
+            & $signtool verify /pa /v $exe.Path
+            if ($LASTEXITCODE -ne 0) {
+              throw "signtool failed to verify $($exe.Path)"
+            }
+
+            $signature = Get-AuthenticodeSignature -LiteralPath $exe.Path
+            if ($signature.Status -ne "Valid") {
+              throw "Invalid Authenticode signature for $($exe.Path): $($signature.Status)"
+            }
+          }
+
+      - name: Re-create signed Windows ZIP
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "portzero-windows-amd64" -DestinationPath "portzero-windows-amd64.zip" -Force
+
+      - name: Upload signed artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: portzero-windows-amd64
+          path: portzero-windows-amd64.zip
+          overwrite: true
+
+  package-linux:
+    name: Build Linux Packages
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    # Disabled for launch: focusing on one Linux install path (linux-install.sh)
+    # instead of also shipping .deb/.rpm. cargo-deb/cargo-generate-rpm metadata
+    # stays in client/crates/cli/Cargo.toml so this can be re-enabled later.
+    if: false
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set CLI package version
+        run: scripts/set-cli-version.sh "${{ needs.version.outputs.version }}"
+        shell: bash
+
+      - name: Download amd64 Linux artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: portzero-linux-amd64
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # cargo-deb's `$auto` dependency resolution runs dpkg-shlibdeps over every
+      # packaged binary, including the tray (GTK / libxdo / libayatana-appindicator)
+      # and the portzero-app desktop app (webkit2gtk / GTK / libayatana-appindicator).
+      # Those runtime libraries must be present on the packaging runner so
+      # shlibdeps can map them to the correct Depends.
+      - name: Install tray + app runtime library deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxdo-dev libayatana-appindicator3-dev libwebkit2gtk-4.1-dev
+
+      - name: Extract binary into target/release
+        run: |
+          tar xzf portzero-linux-amd64.tar.gz
+          mkdir -p target/release
+          cp portzero-linux-amd64/portzero target/release/portzero
+          chmod +x target/release/portzero
+          # The amd64 archive also ships the system-tray companion and the
+          # desktop app; place them where cargo-deb / cargo-generate-rpm
+          # expect their bundled assets.
+          cp portzero-linux-amd64/portzero-tray target/release/portzero-tray
+          chmod +x target/release/portzero-tray
+          cp portzero-linux-amd64/portzero-app target/release/portzero-app
+          chmod +x target/release/portzero-app
+
+      - name: Install packaging tools
+        run: cargo install cargo-deb cargo-generate-rpm --locked
+
+      - name: Build .deb package
+        run: cargo deb -p portzero-cli --no-build
+
+      - name: Build .rpm package
+        # cargo-generate-rpm defaults to package.version, which is a bare
+        # SemVer string (e.g. "1.0.4-rc.107") — invalid as an RPM version
+        # since RPM forbids '-'. Override with the '~'-prerelease form.
+        run: cargo generate-rpm -s 'version = "${{ needs.version.outputs.rpm_version }}"'
+        working-directory: client/crates/cli
+
+      - name: Upload .deb
+        uses: actions/upload-artifact@v5
+        with:
+          name: portzero-deb
+          path: target/debian/*.deb
+
+      - name: Upload .rpm
+        uses: actions/upload-artifact@v5
+        with:
+          name: portzero-rpm
+          path: target/generate-rpm/*.rpm
+
+  package-windows:
+    name: Build Windows MSI
+    needs: [version, build, sign-windows-zip]
+    # sign-windows-zip only runs (and is skipped otherwise) for genuine vX.Y.Z
+    # tag builds — tolerate that skip instead of the default success()-only
+    # condition, which would skip this job too on every unstable build.
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download amd64 Windows artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: portzero-windows-amd64
+
+      - name: Extract Windows payload
+        shell: pwsh
+        run: |
+          Expand-Archive `
+            -Path "portzero-windows-amd64.zip" `
+            -DestinationPath "." `
+            -Force
+
+      - name: Install WiX Toolset
+        shell: pwsh
+        run: choco install wixtoolset --no-progress -y
+
+      - name: Build MSI
+        shell: pwsh
+        run: |
+          $sourceDir = (Resolve-Path ".\portzero-windows-amd64").Path
+          $wixRoot = "${env:ProgramFiles(x86)}\WiX Toolset*"
+          $candle = Get-ChildItem $wixRoot -Recurse -Filter candle.exe |
+            Select-Object -First 1
+          $light = Get-ChildItem $wixRoot -Recurse -Filter light.exe |
+            Select-Object -First 1
+
+          if (-not $candle -or -not $light) {
+            throw "WiX Toolset candle.exe/light.exe not found"
+          }
+
+          & $candle.FullName `
+            "-dProductVersion=${{ needs.version.outputs.msi_version }}" `
+            "-dSourceDir=$sourceDir" `
+            -out "portzero.wixobj" `
+            "packaging\windows\portzero.wxs"
+
+          & $light.FullName `
+            -out "portzero-${{ needs.version.outputs.version }}-x86_64.msi" `
+            "portzero.wixobj"
+
+      - name: Generate winget manifest
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem -Filter "portzero-*.msi" | Select-Object -First 1
+          if (-not $msi) {
+            throw "MSI artifact not found after WiX build"
+          }
+
+          & ".\scripts\generate-winget-manifest.ps1" `
+            -Version "${{ needs.version.outputs.version }}" `
+            -MsiPath $msi.FullName
+
+      - name: Upload MSI
+        uses: actions/upload-artifact@v5
+        with:
+          name: portzero-msi
+          path: "*.msi"
+
+      - name: Upload winget manifest
+        uses: actions/upload-artifact@v5
+        with:
+          name: portzero-winget
+          path: packaging/winget/manifests/**
+
+  sign-windows-msi:
+    name: Sign Windows MSI
+    needs: [version, package-windows]
+    # Only a genuine vX.Y.Z tag build goes through Artifact Signing — unstable
+    # MSIs ship unsigned for testing. Split out from package-windows so the
+    # `production` environment gate doesn't hold up every unstable MSI build.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    environment: production
+    steps:
+      - name: Download MSI artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: portzero-msi
+
+      - name: Locate signtool
+        shell: pwsh
+        run: |
+          $signtoolPath = $null
+
+          $signtool = Get-Command signtool.exe -ErrorAction SilentlyContinue
+          if ($signtool) {
+            $signtoolPath = Split-Path -Parent $signtool.Source
+          } else {
+            $kitRoot = Join-Path "${env:ProgramFiles(x86)}" "Windows Kits\10\bin"
+            $signtool = Get-ChildItem $kitRoot -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
+              Sort-Object FullName -Descending |
+              Select-Object -First 1
+            if ($signtool) {
+              $signtoolPath = $signtool.DirectoryName
+            }
+          }
+
+          if (-not $signtoolPath) {
+            throw "signtool.exe was not found on the runner"
+          }
+
+          Add-Content $env:GITHUB_PATH $signtoolPath
+
+      - name: Azure login for Artifact Signing
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign MSI
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+          files-folder: ${{ github.workspace }}
+          files-folder-filter: portzero-*.msi
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Verify MSI signature
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem -Filter "portzero-*.msi" | Select-Object -First 1
+          if (-not $msi) {
+            throw "MSI artifact not found after signing"
+          }
+
+          function Get-SigntoolPath {
+            $cmd = Get-Command signtool.exe -ErrorAction SilentlyContinue
+            if ($cmd) {
+              return $cmd.Source
+            }
+
+            $sdkRoots = @(
+              "${env:ProgramFiles(x86)}\Windows Kits\10\bin",
+              "${env:ProgramFiles(x86)}\Windows Kits\10\App Certification Kit"
+            )
+
+            foreach ($root in $sdkRoots) {
+              if (-not (Test-Path $root)) {
+                continue
+              }
+
+              $candidate = Get-ChildItem -Path $root -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
+                Select-Object -First 1
+              if ($candidate) {
+                return $candidate.FullName
+              }
+            }
+
+            throw "signtool.exe not found on PATH or in the Windows SDK install"
+          }
+
+          $signtool = Get-SigntoolPath
+          & $signtool verify /pa /v $msi.FullName
+          if ($LASTEXITCODE -ne 0) {
+            throw "signtool failed to verify $($msi.FullName)"
+          }
+
+          $signature = Get-AuthenticodeSignature -LiteralPath $msi.FullName
+          if ($signature.Status -ne "Valid") {
+            throw "Invalid Authenticode signature for $($msi.FullName): $($signature.Status)"
+          }
+
+      - name: Upload signed MSI
+        uses: actions/upload-artifact@v5
+        with:
+          name: portzero-msi
+          path: "*.msi"
+          overwrite: true
+
+  test-macos-interop:
+    name: macOS client interop test
+    needs: [version, build]
+    runs-on: macos-15
+    environment: staging
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download macOS client artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: portzero-darwin-arm64
+          path: artifacts
+
+      - name: Extract client binary
+        run: |
+          tar xzf artifacts/portzero-darwin-arm64.tar.gz -C artifacts
+          chmod +x artifacts/portzero-darwin-arm64/portzero
+
+      - name: Run cloud tunnel interop test
+        env:
+          STAGING_DOMAIN: ${{ vars.STAGING_DOMAIN }}
+          TEST_LOGIN_SEED_TOKEN: ${{ secrets.TEST_LOGIN_SEED_TOKEN }}
+          PORTZERO_PREBUILT_BINARY_PATH: artifacts/portzero-darwin-arm64/portzero
+        # GitHub's macos-15 runners occasionally miss the cloud route
+        # registration window with no error on either side (daemon and cloud
+        # both log a clean session) — a brief retry clears it without masking
+        # a real, reproducible failure.
+        run: |
+          max_attempts=2
+          for attempt in $(seq 1 "${max_attempts}"); do
+            if bash scripts/client-interop-e2e.sh; then
+              exit 0
+            fi
+            if [ "${attempt}" -lt "${max_attempts}" ]; then
+              echo "Attempt ${attempt}/${max_attempts} failed, retrying..."
+              sleep 10
+            fi
+          done
+          exit 1
+
+  test-windows-interop:
+    name: Windows client interop test
+    needs: [version, build, package-windows, sign-windows-msi]
+    # sign-windows-msi only runs (and is skipped otherwise) for genuine
+    # vX.Y.Z tag builds — tolerate that skip like package-windows does.
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: windows-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download Windows MSI
+        uses: actions/download-artifact@v5
+        with:
+          name: portzero-msi
+          path: artifacts
+
+      - name: Run cloud tunnel interop test
+        shell: pwsh
+        env:
+          STAGING_DOMAIN: ${{ vars.STAGING_DOMAIN }}
+          TEST_LOGIN_SEED_TOKEN: ${{ secrets.TEST_LOGIN_SEED_TOKEN }}
+        run: |
+          $msi = Get-ChildItem -Path artifacts -Filter "portzero-*.msi" | Select-Object -First 1
+          if (-not $msi) {
+            throw "portzero MSI artifact not found"
+          }
+          $env:PORTZERO_MSI_PATH = $msi.FullName
+          ./scripts/client-interop-e2e.ps1
+
+  release:
+    name: Create Release
+    needs:
+      [version, build, package-windows, test-macos-interop, test-windows-interop]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      build-run-id: ${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+          pattern: portzero-*
+          merge-multiple: true
+
+      - name: Download OS packages
+        uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+          pattern: portzero-{msi,winget}
+          merge-multiple: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: extractions/setup-just@v3
+
+      - name: Generate OpenAPI spec
+        run: just openapi
+
+      - name: Copy OpenAPI spec into release assets
+        run: cp api/management-v1.yaml artifacts/management-v1.yaml
+
+      - name: Generate version manifest
+        run: |
+          echo "{\"version\":\"${{ needs.version.outputs.version }}\",\"commit\":\"${{ github.sha }}\"}" \
+            > artifacts/version.json
+
+      - name: Compose release notes
+        run: |
+          if [ "${{ needs.version.outputs.prerelease }}" = "true" ]; then
+            # Unstable channel: intentionally NOT the stable brew/curl commands, so a
+            # copy-paste from this page can only ever install the unstable build.
+            cat > artifacts/NOTES.md <<'EOF'
+          ## Unstable channel — for testing only
+
+          > This is an **unstable build cut off `staging`** for testing installers.
+          > It is not a supported release. Stable users are never directed or
+          > updated here. It talks to the **production** portzero.cloud, same as
+          > stable. See [docs/developers/unstable-channel.md](https://github.com/PortZeroNetwork/portzero-local/blob/staging/docs/developers/unstable-channel.md).
+
+          **macOS (Homebrew — unstable formula `portzero-edge`)**
+          ```sh
+          brew tap PortZeroNetwork/portzero
+          brew install portzeronetwork/portzero/portzero-edge
+          ```
+
+          > **macOS: unsigned builds and Gatekeeper.** Unstable binaries are not
+          > Apple-signed or notarized. Homebrew installs are normally not quarantined;
+          > a browser-downloaded tarball is — clear it with
+          > `xattr -d com.apple.quarantine <path-to-binary>` or right-click **Open** once.
+
+          **Linux**
+          ```sh
+          curl -fsSL https://github.com/PortZeroNetwork/portzero-local/releases/latest/download/linux-install.sh | PORTZERO_CHANNEL=prerelease sh
+          ```
+
+          **Windows**
+
+          Download the `.msi` from the assets below and run it manually.
+
+          ---
+          EOF
+          else
+            cat > artifacts/NOTES.md <<'EOF'
+          ## Install
+
+          > **Local** (`*.portzero.local`) is free, open-source software under the [GNU GPL v3.0](https://github.com/PortZeroNetwork/portzero-local/blob/staging/LICENSE).
+          > **Cloud** features are governed by the [Port Zero Terms of Service](https://portzero.net/terms).
+
+          **macOS (Homebrew)**
+          ```sh
+          brew tap PortZeroNetwork/portzero
+          brew install portzero
+          ```
+
+          > **macOS: unsigned builds and Gatekeeper.** These binaries are not yet
+          > Apple-signed or notarized. Homebrew-installed binaries are normally not
+          > quarantined, so `brew install` launches fine. If you instead download a
+          > tarball from this page and macOS blocks it ("cannot be opened because the
+          > developer cannot be verified"), clear the flag with
+          > `xattr -d com.apple.quarantine <path-to-binary>`, or right-click it in
+          > Finder and choose **Open** once.
+
+          **Linux**
+          ```sh
+          curl -fsSL https://portzero.net/install.sh | sh
+          ```
+
+          Offline, or want to pin a specific release? Run the release-asset installer directly instead:
+          ```sh
+          curl -fsSL https://github.com/PortZeroNetwork/portzero-local/releases/latest/download/linux-install.sh | sh
+          ```
+
+          Uninstall:
+          ```sh
+          ~/.portzero/bin/portzero-uninstall
+          ```
+          Or run the release asset directly:
+          ```sh
+          curl -fsSL https://github.com/PortZeroNetwork/portzero-local/releases/latest/download/linux-uninstall.sh | sh
+          ```
+
+          **Windows**
+
+          Download `portzero-${{ needs.version.outputs.version }}-x86_64.msi` from the assets below and run it. (winget publishing is coming soon.)
+
+          The installer and daemon perform local setup automatically where supported.
+          After installing, run `portzero start` — it opens the PortZero app. The daemon
+          also serves a browser dashboard at http://portzero.local for debugging.
+
+          ---
+          EOF
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          generate_release_notes: true
+          prerelease: ${{ needs.version.outputs.prerelease }}
+          # A prerelease must never become GitHub's "latest" — that endpoint is
+          # what the CLI update check and the stable install scripts follow.
+          make_latest: ${{ needs.version.outputs.prerelease == 'true' && 'false' || 'true' }}
+          body_path: artifacts/NOTES.md
+          files: |
+            artifacts/*.tar.gz
+            artifacts/*.zip
+            artifacts/*.msi
+            artifacts/version.json
+            artifacts/management-v1.yaml
+            scripts/linux-install.sh
+            scripts/linux-uninstall.sh
+            artifacts/packaging/winget/manifests/**
+
+  check-winget-token:
+    name: Check WinGet Token
+    needs: [release]
+    runs-on: ubuntu-latest
+    if: false  # Disabled along with update-winget (not shipping Winget yet)
+    outputs:
+      has-token: ${{ steps.check.outputs.has-token }}
+    steps:
+      - name: Check token presence
+        id: check
+        run: echo "has-token=${{ secrets.WINGET_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
+
+  update-winget:
+    name: Update WinGet Package
+    needs: [version, release, check-winget-token]
+    runs-on: ubuntu-latest
+    if: false  # Disabled: not shipping Winget packages yet
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Submit package to Windows Package Manager Community Repository
+        uses: vedantmgoyal2009/winget-releaser@v2
+        with:
+          identifier: PortZeroNetwork.PortZero
+          installers-regex: 'portzero-.*-x86_64\.msi$'
+          version: ${{ needs.version.outputs.version }}
+          release-tag: ${{ needs.version.outputs.tag }}
+          release-repository: portzero-local
+          token: ${{ secrets.WINGET_TOKEN }}
+          fork-user: PortZeroNetwork
+
+  check-homebrew-token:
+    name: Check Homebrew Token
+    needs: [release]
+    runs-on: ubuntu-latest
+    outputs:
+      has-token: ${{ steps.check.outputs.has-token }}
+    steps:
+      - name: Check token presence
+        id: check
+        run: echo "has-token=${{ secrets.HOMEBREW_TAP_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
+
+  update-homebrew:
+    name: Update Homebrew Formula
+    needs: [version, release, check-homebrew-token]
+    runs-on: ubuntu-latest
+    if: ${{ needs.check-homebrew-token.outputs.has-token == 'true' }}
+    steps:
+      - name: Download macOS SHA256 files
+        uses: actions/download-artifact@v5
+        with:
+          pattern: sha256-portzero-darwin-*
+          merge-multiple: true
+
+      - name: Checkout portzero-local (unstable formula template)
+        if: ${{ needs.version.outputs.prerelease == 'true' }}
+        uses: actions/checkout@v5
+        with:
+          path: src
+
+      - name: Checkout tap repository
+        uses: actions/checkout@v5
+        with:
+          repository: PortZeroNetwork/homebrew-portzero
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Update formula
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          FORMULA: ${{ needs.version.outputs.formula }}
+        run: |
+          AARCH64_SHA256=$(cat portzero-darwin-arm64.sha256)
+          X86_64_SHA256=$(cat portzero-darwin-amd64.sha256)
+
+          TARGET="tap/Formula/${FORMULA}.rb"
+
+          if [ "${FORMULA}" = "portzero-edge" ]; then
+            # Seed the unstable formula (still named portzero-edge) from the in-repo template (single source of
+            # truth for its shape) so the tap does not have to carry it by hand.
+            mkdir -p tap/Formula
+            cp "src/packaging/homebrew/Formula/portzero-edge.rb" "$TARGET"
+          fi
+
+          sed -i "s/version \"[^\"]*\"/version \"${VERSION}\"/" "$TARGET"
+          sed -i "s/sha256 \"[^\"]*\" # arm64/sha256 \"${AARCH64_SHA256}\" # arm64/" "$TARGET"
+          sed -i "s/sha256 \"[^\"]*\" # x86_64/sha256 \"${X86_64_SHA256}\" # x86_64/" "$TARGET"
+
+      - name: Commit and push
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          FORMULA: ${{ needs.version.outputs.formula }}
+        run: |
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "Formula/${FORMULA}.rb"
+          git diff --staged --quiet || git commit -m "${FORMULA} v${VERSION}"
+          git push
+
+  verify-homebrew-artifacts:
+    name: Verify published Homebrew formula (url + sha256)
+    # Post-publish smoke: the one thing a VM test genuinely can't cover — that
+    # the formula's REAL published GitHub URL actually resolves AND its declared
+    # sha256 matches the published tarball. Catches the `0000…` placeholder
+    # sha256 never getting filled in, a formula whose version didn't get bumped,
+    # or a broken/renamed release asset URL — none of which are reproducible
+    # offline in a guest. Runs after update-homebrew so it reads the just-pushed
+    # tap formula, i.e. exactly what `brew install` will fetch.
+    needs: [version, check-homebrew-token, update-homebrew]
+    runs-on: ubuntu-latest
+    if: ${{ needs.check-homebrew-token.outputs.has-token == 'true' }}
+    steps:
+      - name: Checkout tap repository
+        uses: actions/checkout@v5
+        with:
+          repository: PortZeroNetwork/homebrew-portzero
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Verify formula url resolves and sha256 matches
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          FORMULA_NAME: ${{ needs.version.outputs.formula }}
+        run: |
+          set -uo pipefail
+          FORMULA="tap/Formula/${FORMULA_NAME}.rb"
+          test -f "$FORMULA" || { echo "RESULT=FAIL formula not found at $FORMULA"; exit 1; }
+          fail=0
+
+          # The formula must have been bumped to the release version.
+          fver="$(grep -oE 'version "[^"]+"' "$FORMULA" | head -1 | sed -E 's/version "([^"]+)"/\1/')"
+          if [ "$fver" = "$VERSION" ]; then
+            echo "PHASE=formula-version ok=true value=$fver"
+          else
+            echo "PHASE=formula-version ok=false declared=$fver expected=$VERSION"
+            fail=1
+          fi
+
+          verify() { # <name> <url> <declared-sha256>
+            local name="$1" url="$2" sha="$3"
+            if [ -z "$url" ]; then echo "PHASE=$name-url ok=false reason=missing-in-formula"; fail=1; return; fi
+            if [ -z "$sha" ]; then echo "PHASE=$name-sha ok=false reason=missing-in-formula"; fail=1; return; fi
+            # Reject the all-zero placeholder that ships in the source formula.
+            case "$sha" in
+              *[!0]*) : ;;
+              *) echo "PHASE=$name-sha ok=false reason=all-zero-placeholder (release.yml never filled it in) url=$url"; fail=1; return ;;
+            esac
+            local tmp; tmp="$(mktemp)"
+            if ! curl -fsSL --retry 3 --retry-delay 5 -o "$tmp" "$url"; then
+              echo "PHASE=$name-url ok=false reason=unresolvable url=$url"; fail=1; rm -f "$tmp"; return
+            fi
+            local actual; actual="$(sha256sum "$tmp" | awk '{print $1}')"
+            rm -f "$tmp"
+            if [ "$actual" = "$sha" ]; then
+              echo "PHASE=$name ok=true url=$url"
+            else
+              echo "PHASE=$name ok=false reason=sha256-mismatch declared=$sha actual=$actual url=$url"; fail=1
+            fi
+          }
+
+          for arch in arm64 amd64; do
+            url="$(grep -oE "https://[^\"]*portzero-darwin-${arch}[^\"]*" "$FORMULA" | head -1)"
+            # The formula embeds Ruby string interpolation (`#{version}`) in its url
+            # lines, resolved by Homebrew at install time but not by a raw grep here.
+            interp='#{version}'
+            url="${url//$interp/$VERSION}"
+            # sha256 lines are tagged with a trailing arch comment: `# arm64` / `# x86_64`.
+            tag="$arch"; [ "$arch" = amd64 ] && tag="x86_64"
+            sha="$(grep -E "sha256 \"[0-9a-fA-F]+\" # ${tag}" "$FORMULA" | grep -oiE '[0-9a-f]{64}' | head -1)"
+            verify "darwin-${arch}" "$url" "$sha"
+          done
+
+          if [ "$fail" -eq 0 ]; then
+            echo "RESULT=PASS published homebrew formula url+sha256 verified"
+          else
+            echo "RESULT=FAIL published homebrew formula verification failed"
+            exit 1
+          fi

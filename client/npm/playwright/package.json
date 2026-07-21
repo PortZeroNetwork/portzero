@@ -1,0 +1,39 @@
+{
+  "name": "@portzero/playwright",
+  "version": "0.1.0",
+  "description": "Playwright fixtures for Port Zero tunnels: resolve baseURL from the daemon, wait for readiness/health, supply httpCredentials, and stamp per-test X-PZ-Test headers.",
+  "keywords": [
+    "playwright",
+    "portzero",
+    "tunnel",
+    "testing",
+    "e2e"
+  ],
+  "license": "MIT",
+  "homepage": "https://portzero.net",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/PortZeroNetwork/portzero-local.git",
+    "directory": "client/npm/playwright"
+  },
+  "type": "commonjs",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "peerDependencies": {
+    "@playwright/test": ">=1.30.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -1,0 +1,26 @@
+/target
+**/target/
+.wintun/
+.env
+.devenv/
+devenv-tunnel.db
+*.pem
+*.key
+*.log
+.idea/
+.DS_Store
+
+# Claude Code agent worktrees (scratch state for isolated subagent runs)
+.claude/worktrees/
+# Ticketry ticket management state (index.db, hooks state, etc.) is never committed
+/.ticketry/index.db
+
+# Parallels VM test harness: downloaded installers cached Mac-side (never commit)
+/vmtest/cache/
+
+# CI-downloaded per-commit windows/linux binaries for vm-test (see
+# downloaded_artifact_host_path in vmtest/scripts/vm.sh)
+/vmtest/.downloaded-artifacts/
+
+# VM benchmark telemetry (host-specific)
+/vmtest/bench/

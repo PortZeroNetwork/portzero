@@ -1,0 +1,4 @@
+interface:
+  display_name: "Plan Deploy IaC"
+  short_description: "Plan and deploy Terraform-managed SaaS infrastructure"
+  default_prompt: "Use $plan-deploy-iac to plan production and staging infrastructure with Terraform, GitHub Actions, and lifecycle-aware SaaS billing."

@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PortZero Local</title>
+<link rel="icon" type="image/jpeg" href="/assets/portzero-mark.jpg">
+<link rel="apple-touch-icon" href="/assets/portzero-mark.jpg">
+<style>
+:root{color-scheme:light dark;--bg:#fdfdfd;--fg:#1f2328;--muted:#6b7280;--soft:#f3f4f6;--line:#e5e7eb;--accent:#2563eb;--accent-soft:#dbeafe;--ok:#16833a;--warn:#a16207;--bad:#c2410c;--code:#111827;--code-fg:#f9fafb;--term-bg:#0b1020;--term-fg:#e6edf3}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1115;--fg:#e5e7eb;--muted:#9ca3af;--soft:#171a21;--line:#2b303b;--accent:#7dd3fc;--accent-soft:#102a3a;--ok:#86efac;--warn:#facc15;--bad:#fb923c;--code:#05070a;--code-fg:#f3f4f6}}
+*,*::before,*::after{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:16px;line-height:1.65}
+a{color:inherit;text-decoration:none}
+a:hover{color:var(--accent)}
+code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.shell{width:min(100% - 32px,1120px);margin:0 auto}
+.topbar{position:sticky;top:0;z-index:3;background:color-mix(in srgb,var(--bg) 90%,transparent);backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}
+.nav{display:flex;align-items:center;gap:18px;min-height:62px}
+.brand{display:inline-flex;align-items:center;gap:12px;font-size:18px;font-weight:800}
+.brand img{display:block;height:28px;width:auto}
+.navlinks{display:flex;gap:14px;margin-left:auto;color:var(--muted);font-size:14px}
+.meta{color:var(--muted);font-size:13px;white-space:nowrap}
+.hero{padding:40px 0 8px;display:grid;gap:12px}
+.eyebrow{color:var(--accent);font-size:13px;font-weight:700;margin:0}
+h1{font-size:clamp(30px,5vw,52px);line-height:1.06;margin:0}
+.lede{max-width:720px;color:var(--muted);font-size:18px;margin:0}
+.section{padding:30px 0;border-top:1px solid var(--line)}
+.section-head{display:flex;align-items:end;gap:16px;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap}
+h2{font-size:26px;line-height:1.2;margin:0}
+.section-note{color:var(--muted);font-size:14px;margin:0}
+h3{font-size:18px;margin:0 0 8px}
+.placeholder{color:var(--muted);margin:0}
+.code-row{margin-top:10px;background:var(--code);color:var(--code-fg);border-radius:8px;padding:12px 14px;overflow:auto;font-size:13.5px;white-space:pre}
+.examples{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px}
+.example{border:1px solid var(--line);border-radius:10px;padding:16px}
+.example.dim{opacity:.72}
+.example-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:2px}
+.tag{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;padding:2px 9px;color:var(--muted);font-size:12px}
+.tag.lang{border-color:var(--accent);color:var(--accent)}
+.example-url{color:var(--muted);font-size:13px;margin:8px 0 0}
+.example-actions{display:flex;align-items:center;gap:10px;margin-top:12px;flex-wrap:wrap}
+.requires{color:var(--muted);font-size:13px;margin-top:10px}
+.detected{color:var(--muted);font-size:13px;margin:0}
+.status-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:28px}
+.status-card{min-width:0}
+.status-row{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:14px;margin-bottom:12px}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--bad);flex:0 0 auto}
+.dot.ok{background:var(--ok)}
+.dot.warn{background:var(--warn)}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th{text-align:left;color:var(--muted);font-weight:600;border-bottom:1px solid var(--line);padding:8px 6px}
+td{border-bottom:1px solid var(--line);padding:8px 6px;vertical-align:top;word-break:break-word}
+.domain-stack{display:grid;gap:2px}
+.domain-stack code{font-size:13px}
+.route-alerts{display:grid;gap:6px;margin-top:8px}
+.route-alert{border-left:3px solid var(--warn);background:var(--soft);padding:7px 9px;font-size:13px}
+.route-alert.info{border-left-color:var(--accent)}
+.route-alert.warning{border-left-color:var(--warn)}
+.route-alert-title{font-weight:700}
+.route-alert-detail{color:var(--muted)}
+.substitutions{display:flex;gap:6px;flex-wrap:wrap}
+.substitutions code{background:var(--soft);border-radius:999px;padding:2px 7px;color:var(--fg);font-size:12px}
+.empty{color:var(--muted);font-size:14px;margin:0}
+.empty-action{display:flex;align-items:center;gap:12px;flex-wrap:wrap;color:var(--muted);font-size:14px}
+.empty-action p{margin:0}
+.button{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:36px;border-radius:8px;background:var(--accent);color:#fff;font-weight:700;padding:6px 14px;border:0;font:inherit;font-weight:700;cursor:pointer}
+.button:hover{color:#fff;filter:brightness(1.05)}
+.button[disabled]{opacity:.5;cursor:not-allowed}
+.button.ghost{background:transparent;color:var(--fg);border:1px solid var(--line)}
+.button.ghost:hover{color:var(--fg);border-color:var(--accent)}
+.button.stop{background:var(--bad)}
+.diag{border-left:3px solid var(--line);padding:10px 0 10px 14px;margin-bottom:10px}
+.diag-critical,.diag-error{border-color:var(--bad)}
+.diag-warning{border-color:var(--warn)}
+.diag-info{border-color:var(--accent)}
+.diag-title{font-weight:700}
+.diag-detail,.diag-fix{color:var(--muted);font-size:14px}
+.diag-fix code{background:var(--soft);color:var(--fg);padding:1px 5px;border-radius:4px}
+.no-issues{color:var(--ok);font-size:14px;margin:0}
+.loading{color:var(--muted);padding:24px 0}
+.settings label{display:flex;align-items:flex-start;gap:10px;margin:10px 0;font-size:15px;cursor:pointer}
+.settings input[type=checkbox]{accent-color:var(--accent);margin-top:3px;width:16px;height:16px}
+.settings .setting-body{display:grid;gap:2px}
+.settings .setting-title{font-weight:600}
+.hint{color:var(--muted);font-size:13px;margin:0}
+.subhead{font-size:15px;font-weight:700;margin:22px 0 8px}
+.download-bar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:6px}
+.download-state{color:var(--muted);font-size:14px}
+.download-state.done{color:var(--ok)}
+.console{margin-top:18px;border:1px solid var(--line);border-radius:10px;overflow:hidden;display:none}
+.console.open{display:block}
+.console-head{display:flex;align-items:center;gap:12px;justify-content:space-between;padding:10px 14px;background:var(--soft);border-bottom:1px solid var(--line)}
+.console-title{font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px}
+.term{margin:0;background:var(--term-bg);color:var(--term-fg);padding:14px;height:340px;overflow:auto;font-size:13px;line-height:1.5;white-space:pre-wrap;word-break:break-word}
+.term .cmd{color:#7dd3fc;font-weight:600}
+.term .end{color:#86efac}
+.term .err{color:#fca5a5}
+.spin{width:12px;height:12px;border-radius:50%;border:2px solid var(--muted);border-top-color:var(--accent);display:inline-block;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.endpoint-grid{display:grid;grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr);gap:22px;align-items:start}
+.endpoint-list{display:grid;gap:12px}
+.endpoint{border-top:1px solid var(--line);padding-top:12px}
+.endpoint code{display:block;color:var(--fg);font-size:15px;margin-top:4px;word-break:break-word}
+.method{display:inline-flex;align-items:center;border-radius:4px;padding:1px 6px;background:var(--soft);font-weight:800;font-size:12px;color:var(--accent);margin-right:6px}
+.api-note{color:var(--muted);margin:0 0 14px}
+.spec-block{max-height:520px;overflow:auto;background:var(--code);color:var(--code-fg);border-radius:8px;padding:14px;font-size:12px;line-height:1.5}
+.spec-block code{white-space:pre}
+@media (max-width:760px){.nav{align-items:flex-start;flex-direction:column;gap:6px;padding:12px 0}.navlinks{margin-left:0;flex-wrap:wrap}.status-grid{grid-template-columns:1fr}.section-head{display:block}}
+@media (max-width:860px){.endpoint-grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header class="topbar">
+  <nav class="shell nav" aria-label="Main">
+    <a class="brand" href="/">
+      <img src="/assets/portzero-mark.jpg" alt="" aria-hidden="true">
+      <span>PortZero</span>
+    </a>
+    <div class="navlinks">
+      <a href="#settings">Settings</a>
+      <a href="#getting-started">Getting Started</a>
+      <a href="#tunnels">Tunnels</a>
+      <a href="#api">API</a>
+      <a href="#issues">Issues</a>
+    </div>
+    <span class="meta" id="hdr-meta"></span>
+  </nav>
+</header>
+<main class="shell">
+  <section class="hero">
+    <p class="eyebrow">PortZero Local</p>
+    <h1>Local dashboard</h1>
+    <p class="lede">Give any local app a real name — <code>myapp.portzero.local</code> — instead of juggling ports. Set <code>PZ_TUNNEL</code> when you start it, and the daemon routes the name to it.</p>
+  </section>
+
+  <!-- 1. SETTINGS -->
+  <section class="section" id="settings" aria-labelledby="settings-title">
+    <div class="section-head">
+      <h2 id="settings-title">Settings</h2>
+      <p class="section-note">Read-only. Change settings in the tray app or ~/.portzero/config.toml.</p>
+    </div>
+    <div class="settings">
+      <label>
+        <input type="checkbox" id="set-auto-open" disabled>
+        <span class="setting-body">
+          <span class="setting-title">Open a browser tab when a web tunnel appears</span>
+          <span class="hint">When an app starts serving on http (port 80) or https (port 443) at a <code>*.portzero.local</code> name, open it automatically. On by default.</span>
+        </span>
+      </label>
+      <label>
+        <input type="checkbox" id="set-https-80" disabled>
+        <span class="setting-body">
+          <span class="setting-title">Enable HTTPS (port 443) for backends on port 80</span>
+          <span class="hint">Local HTTP works out of the box. For HTTPS on <code>*.portzero.local</code> we add a local CA to your trust stores on install (best-effort); if your browser still warns, see the troubleshooting docs. Cloud tunnels get public TLS automatically.</span>
+        </span>
+      </label>
+      <label>
+        <input type="checkbox" id="set-https-redirect" disabled>
+        <span class="setting-body">
+          <span class="setting-title">Redirect HTTP (port 80) → HTTPS</span>
+        </span>
+      </label>
+      <label>
+        <input type="checkbox" id="set-https-passthrough" disabled>
+        <span class="setting-body">
+          <span class="setting-title">Passthrough TLS on port 443 when the backend speaks TLS</span>
+        </span>
+      </label>
+    </div>
+  </section>
+
+  <!-- 2. GETTING STARTED -->
+  <section class="section" id="getting-started" aria-labelledby="gs-title">
+    <div class="section-head">
+      <h2 id="gs-title">Getting Started</h2>
+      <p class="section-note" id="gs-detected"></p>
+    </div>
+    <p class="placeholder">Download the examples, then run one. Each example sets <code>PZ_TUNNEL</code> and starts a small web app — the commands are shown so you can see exactly how it works.</p>
+    <div class="download-bar">
+      <button class="button" id="download-btn" type="button">Download examples</button>
+      <span class="download-state" id="download-state"></span>
+    </div>
+    <p class="hint" id="download-hint">Clones <code>github.com/PortZeroNetwork/portzero-examples</code> to <code>~/portzero-examples</code>.</p>
+
+    <div class="console" id="console">
+      <div class="console-head">
+        <span class="console-title" id="console-title"></span>
+        <button class="button stop" id="console-stop" type="button">Stop</button>
+      </div>
+      <pre class="term" id="term" aria-live="polite"></pre>
+    </div>
+
+    <div class="subhead" id="examples-subhead" style="display:none">Examples</div>
+    <div class="examples" id="examples-list"></div>
+  </section>
+
+  <!-- 3. TUNNELS -->
+  <section class="section" id="tunnels" aria-labelledby="tunnels-title">
+    <div class="section-head">
+      <h2 id="tunnels-title">Tunnels</h2>
+      <p class="section-note" id="hdr-ts"></p>
+    </div>
+    <div id="status-root"><p class="loading">Connecting to daemon...</p></div>
+  </section>
+
+  <!-- API + registrations -->
+  <section class="section" id="api" aria-labelledby="api-title">
+    <div class="section-head">
+      <h2 id="api-title">Local API</h2>
+      <p class="section-note">For local processes only. This page does not send API requests.</p>
+    </div>
+    <div class="endpoint-grid">
+      <div>
+        <p class="api-note">Endpoint base URL:</p>
+        <pre class="code-row"><code>http://api.portzero.local</code></pre>
+        <div class="endpoint-list" aria-label="API routes">
+          <div class="endpoint"><span class="method">POST</span><strong>Register ports</strong><code>/v1/register</code></div>
+          <div class="endpoint"><span class="method">DELETE</span><strong>Deregister ports</strong><code>/v1/register</code></div>
+          <div class="endpoint"><span class="method">GET</span><strong>Process registration status</strong><code>/v1/status</code></div>
+        </div>
+      </div>
+      <div>
+        <p class="api-note">OpenAPI 3.1 spec. The raw document is also available at <code>/openapi.json</code>.</p>
+        <pre class="spec-block" aria-label="OpenAPI specification"><code id="openapi-spec-code">Loading...</code></pre>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="issues" aria-labelledby="issues-title">
+    <div class="section-head"><h2 id="issues-title">Issues</h2></div>
+    <div id="issues-root"><p class="loading">Loading…</p></div>
+  </section>
+</main>
+<script>
+let latestData=null;
+let activeRun=null; // {id, es}
+
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+function dot(ok){return '<span class="dot '+(ok?'ok':'')+'"></span>'}
+function osId(d){return ((d.environment||{}).os||{}).id||'linux'}
+function dockerInstalled(d){return !!(((d.environment||{}).docker||{}).installed)}
+function langInstalled(d,langId){
+  const items=((d.languages||{}).items)||[];
+  const l=items.find(function(x){return x.id===langId});
+  return !!(l&&l.installed);
+}
+function exampleCommand(ex,os){const c=ex.commands||{};return c[os]||c.linux||c.macos||c.windows||''}
+function exampleUrl(ex){return 'http://'+String(ex.domain||'').replace(/:80$/,'').replace(/:443$/,'')+'/'}
+function exampleRunnable(d,ex){
+  if(ex.requires_docker&&!dockerInstalled(d)) return false;
+  return langInstalled(d,ex.language);
+}
+
+// ---- Settings ----
+function renderSettings(d){
+  const hp=d.https_policy||{};
+  const set=function(id,v){const el=document.getElementById(id);if(el&&document.activeElement!==el) el.checked=!!v};
+  set('set-auto-open',d.auto_open_http_tunnels);
+  set('set-https-80',hp.enable_for_port_80);
+  set('set-https-redirect',hp.redirect_port_80);
+  set('set-https-passthrough',hp.passthrough_port_443);
+}
+
+// ---- Getting started ----
+function sortedExamples(d){
+  const all=((d.getting_started||{}).examples||[]).slice();
+  const guess=(d.languages||{}).default;
+  function rank(ex){
+    const runnable=exampleRunnable(d,ex)?0:1;
+    const guessed=ex.language===guess?0:1;
+    return runnable*10+guessed;
+  }
+  all.sort(function(a,b){
+    const r=rank(a)-rank(b);
+    if(r!==0) return r;
+    return (a.title||a.id).localeCompare(b.title||b.id);
+  });
+  return all;
+}
+function renderDetected(d){
+  const items=((d.languages||{}).items)||[];
+  const names=items.filter(function(l){return l.installed}).map(function(l){return l.label});
+  const el=document.getElementById('gs-detected');
+  el.textContent=names.length?('Detected: '+names.slice(0,5).join(', ')):'';
+}
+function renderDownload(d){
+  const ex=d.examples||{};
+  const btn=document.getElementById('download-btn');
+  const state=document.getElementById('download-state');
+  if(ex.downloaded){
+    btn.textContent='Re-download / update';
+    btn.classList.add('ghost');
+    state.textContent='Downloaded to '+(ex.dir||'~/portzero-examples');
+    state.classList.add('done');
+  }else{
+    btn.textContent='Download examples';
+    btn.classList.remove('ghost');
+    if(!btn.dataset.busy){state.textContent='';state.classList.remove('done')}
+  }
+}
+async function doDownload(){
+  const btn=document.getElementById('download-btn');
+  const state=document.getElementById('download-state');
+  btn.dataset.busy='1';btn.disabled=true;
+  state.classList.remove('done');
+  state.innerHTML='<span class="spin"></span> Downloading…';
+  try{
+    const r=await fetch('/v1/examples/download',{method:'POST'});
+    const j=await r.json().catch(function(){return{}});
+    state.textContent=j.message||(r.ok?'Done.':'Download failed.');
+    if(r.ok) state.classList.add('done');
+  }catch(e){
+    state.textContent='Download failed: '+e;
+  }
+  delete btn.dataset.busy;btn.disabled=false;
+  load();
+}
+function renderExamples(d){
+  const list=document.getElementById('examples-list');
+  const subhead=document.getElementById('examples-subhead');
+  const examples=sortedExamples(d);
+  if(!examples.length){list.innerHTML='';subhead.style.display='none';return}
+  subhead.style.display='';
+  const os=osId(d);
+  const downloaded=!!(d.examples&&d.examples.downloaded);
+  const running=((d.examples||{}).running)||[];
+  list.innerHTML=examples.map(function(ex){
+    const runnable=exampleRunnable(d,ex);
+    const cmd=exampleCommand(ex,os);
+    const code='$ cd '+esc(ex.path)+'\n$ '+esc(cmd);
+    const isRunning=running.indexOf(ex.id)>=0;
+    let actions='';
+    let requires='';
+    if(runnable){
+      if(!downloaded){
+        actions='<button class="button" type="button" disabled>Run</button><span class="hint">Download the examples first</span>';
+      }else if(isRunning){
+        actions='<button class="button stop" type="button" data-stop="'+esc(ex.id)+'">Stop</button>'
+          +'<a class="button ghost" href="'+esc(exampleUrl(ex))+'" target="_blank" rel="noopener">Open</a>';
+      }else{
+        actions='<button class="button" type="button" data-run="'+esc(ex.id)+'" data-title="'+esc(ex.title||ex.id)+'">Run</button>';
+      }
+    }else{
+      const need=[];
+      if(!langInstalled(d,ex.language)) need.push(esc(ex.language_label||ex.language));
+      if(ex.requires_docker&&!dockerInstalled(d)) need.push('Docker');
+      requires='<p class="requires">Install '+need.join(' and ')+' to run this. The commands are above.</p>';
+    }
+    return '<article class="example'+(runnable?'':' dim')+'">'
+      +'<div class="example-head"><span class="tag lang">'+esc(ex.language_label||ex.language)+'</span>'
+      +'<span class="tag">'+esc(ex.variant_label||ex.variant)+'</span></div>'
+      +'<h3>'+esc(ex.title||ex.id)+'</h3>'
+      +'<pre class="code-row"><code>'+code+'</code></pre>'
+      +'<p class="example-url">Opens <code>'+esc(exampleUrl(ex))+'</code></p>'
+      +(actions?'<div class="example-actions">'+actions+'</div>':'')
+      +requires
+      +'</article>';
+  }).join('');
+  list.querySelectorAll('[data-run]').forEach(function(b){
+    b.addEventListener('click',function(){runExample(b.getAttribute('data-run'),b.getAttribute('data-title'))});
+  });
+  list.querySelectorAll('[data-stop]').forEach(function(b){
+    b.addEventListener('click',function(){stopExample(b.getAttribute('data-stop'))});
+  });
+}
+
+// ---- Terminal console ----
+function stripAnsi(s){return String(s).replace(/\x1b\[[0-9;?=]*[A-Za-z]/g,'').replace(/\x1b[=>]/g,'').replace(/\r/g,'')}
+function termAppend(text,cls){
+  const term=document.getElementById('term');
+  const atBottom=term.scrollHeight-term.scrollTop-term.clientHeight<40;
+  const span=document.createElement('span');
+  if(cls) span.className=cls;
+  span.textContent=stripAnsi(text)+'\n';
+  term.appendChild(span);
+  if(atBottom) term.scrollTop=term.scrollHeight;
+}
+function openConsole(title){
+  const c=document.getElementById('console');
+  document.getElementById('term').textContent='';
+  document.getElementById('console-title').innerHTML='<span class="spin"></span> '+esc(title);
+  c.classList.add('open');
+  c.scrollIntoView({block:'nearest'});
+}
+function markConsoleDone(){
+  const t=document.getElementById('console-title');
+  t.innerHTML=t.textContent.replace(/^\s*/,'');
+}
+function runExample(id,title){
+  if(activeRun){try{activeRun.es.close()}catch(e){}}
+  openConsole(title||id);
+  const es=new EventSource('/v1/examples/run?id='+encodeURIComponent(id));
+  activeRun={id:id,es:es};
+  es.onmessage=function(ev){
+    const cls=ev.data.charAt(0)==='$'?'cmd':'';
+    termAppend(ev.data,cls);
+  };
+  es.addEventListener('end',function(ev){termAppend(ev.data,'end');finishRun()});
+  es.addEventListener('error',function(ev){
+    if(ev.data) termAppend(ev.data,'err');
+    // A network drop with no payload: stop rather than let EventSource re-run.
+    finishRun();
+  });
+}
+function finishRun(){
+  if(activeRun){try{activeRun.es.close()}catch(e){}}
+  activeRun=null;
+  markConsoleDone();
+  load();
+}
+function stopExample(id){
+  termAppend('[stopping…]','end');
+  // Deliberately leave the EventSource open: the backend keeps streaming
+  // teardown output (e.g. `docker compose down`) and a final "end" event
+  // over this same connection, and the 'end' listener above (finishRun)
+  // closes it once that arrives. Closing it here would cut the connection
+  // before the stop confirmation — or any error — ever reaches the console.
+  fetch('/v1/examples/stop?id='+encodeURIComponent(id),{method:'POST'})
+    .then(function(res){
+      if(!res.ok){
+        termAppend('[stop request failed: HTTP '+res.status+']','err');
+      }
+    })
+    .catch(function(e){
+      termAppend('[stop request failed: '+e+']','err');
+    });
+  // Fallback in case the stream never delivers an "end" event (e.g. the
+  // example id wasn't found server-side, or the connection had already
+  // dropped) so the console doesn't spin forever.
+  setTimeout(function(){
+    if(activeRun && activeRun.id===id) finishRun();
+  },10000);
+}
+
+// ---- Tunnels (local + cloud) ----
+function renderSubstitutions(values){
+  const entries=Object.entries(values||{});
+  if(!entries.length) return '<span class="empty">none detected</span>';
+  return '<div class="substitutions">'+entries.map(function(p){return '<code>{'+esc(p[0])+'}='+esc(p[1])+'</code>'}).join('')+'</div>';
+}
+function domainCell(row){
+  const domain=row.link_url?'<a href="'+esc(row.link_url)+'"><strong>'+esc(row.domain)+'</strong></a>':'<strong>'+esc(row.domain)+'</strong>';
+  let alerts='';
+  if(row.alerts&&row.alerts.length){
+    alerts='<div class="route-alerts">'+row.alerts.map(function(a){
+      const sev=(a.severity||'warning').toLowerCase();
+      return '<div class="route-alert '+esc(sev)+'"><div class="route-alert-title">'+esc(a.title)+'</div><div class="route-alert-detail">'+esc(a.detail)+'</div></div>';
+    }).join('')+'</div>';
+  }
+  return '<div class="domain-stack">'+domain+'<code>template: '+esc(row.domain_template||row.domain)+'</code><code>materialized: '+esc(row.domain)+'</code>'+alerts+'</div>';
+}
+function cloudStatusBadge(status){
+  if(status==='pending_review') return '<span title="Awaiting your approval in app.portzero.cloud" style="display:inline-block;padding:1px 8px;border-radius:10px;background:#fdf3e0;color:#a9640a;font-size:12px">🔒 In Review — <a href="https://app.portzero.cloud/reviews" target="_blank" rel="noopener">approve</a></span>';
+  if(status==='denied') return '<span style="display:inline-block;padding:1px 8px;border-radius:10px;background:#fde0e0;color:#b02121;font-size:12px">denied</span>';
+  return '<span style="display:inline-block;padding:1px 8px;border-radius:10px;background:#e0f5e6;color:#1a7f37;font-size:12px">published</span>';
+}
+function renderTunnels(d){
+  let html='<div class="status-grid">';
+  html+='<section class="status-card"><h3>Local tunnels</h3>';
+  html+='<div class="status-row">'+dot(d.overlay_active)+(d.overlay_active?'active':'inactive')+'</div>';
+  if(d.local_services&&d.local_services.length>0){
+    html+='<table><thead><tr><th>domain</th><th>substitutions</th><th>real addr</th><th>port</th><th>pid</th></tr></thead><tbody>';
+    d.local_services.forEach(function(s){
+      html+='<tr><td>'+domainCell(s)+'</td><td>'+renderSubstitutions(s.substitutions)+'</td><td>'+esc(s.real_addr)+'</td><td>'+esc(s.service_port)+'</td><td>'+esc(s.pid)+'</td></tr>';
+    });
+    html+='</tbody></table>';
+  }else{
+    html+='<p class="empty">no local tunnels yet — run an example above to see one appear</p>';
+  }
+  html+='</section>';
+
+  html+='<section class="status-card"><h3>Cloud tunnels</h3>';
+  html+='<div class="status-row">'+dot(d.cloud_connected)+(d.cloud_connected?'connected':'disconnected');
+  if(d.cloud_plan) html+=' <span style="font-size:13px">['+esc(d.cloud_plan)+']</span>';
+  if(d.cloud_error) html+=' <span style="color:var(--bad);font-size:13px">- '+esc(d.cloud_error)+'</span>';
+  html+='</div>';
+  if(d.auth_authenticated&&d.cloud_can_use_tunnels===false){
+    html+='<div style="margin:6px 0;padding:10px 12px;border:1px solid #e6a23c;background:#fef3e6;font-size:13px;">'
+      +'<p style="margin:0 0 8px;font-weight:700;">Upgrade to use Cloud tunnels</p>'
+      +'<p style="margin:0 0 8px;">Your account is on the free plan, so Cloud tunnels aren\'t available yet. '
+      +'<a href="https://portzero.net/#pricing" target="_blank" rel="noopener">See pricing</a>.</p>'
+      +'<pre class="code-row"><code>PZ_TUNNEL={branch}.mytodoapp.portzero.local:80            # Local tunnel\nPZ_TUNNEL={branch}.mytodoapp.&lt;username&gt;.portzero.cloud:80 # Cloud tunnel</code></pre>'
+      +'</div>';
+  }
+  if(d.cloud_message){
+    html+='<div style="margin:6px 0;padding:6px 8px;border:1px solid #e6a23c;background:#fef3e6;font-size:13px;">'+esc(d.cloud_message)+' <a href="https://app.portzero.cloud" target="_blank" rel="noopener">Upgrade</a></div>';
+  }
+  if(d.cloud_routes&&d.cloud_routes.length>0){
+    html+='<table><thead><tr><th>domain</th><th>status</th><th>substitutions</th><th>port</th><th>pid</th></tr></thead><tbody>';
+    d.cloud_routes.forEach(function(r){
+      html+='<tr><td>'+domainCell(r)+'</td><td>'+cloudStatusBadge(r.status)+'</td><td>'+renderSubstitutions(r.substitutions)+'</td><td>'+esc(r.port)+'</td><td>'+esc(r.pid)+'</td></tr>';
+    });
+    html+='</tbody></table>';
+  }else if(!d.auth_authenticated){
+    html+='<div class="empty-action"><p>No cloud tunnels because you are not logged in.</p><a class="button" href="/login">Log in</a></div>';
+  }else{
+    html+='<p class="empty">no cloud tunnels</p>';
+  }
+  html+='</section></div>';
+
+  html+='<section style="margin-top:24px"><h3>API registrations <span class="section-note">(unstable)</span></h3>';
+  if(d.management_registrations&&d.management_registrations.length>0){
+    html+='<table><thead><tr><th>pid</th><th>local port</th><th>domain</th></tr></thead><tbody>';
+    d.management_registrations.forEach(function(r){html+='<tr><td>'+esc(r.pid)+'</td><td>'+esc(r.local_port)+'</td><td>'+esc(r.domain)+'</td></tr>'});
+    html+='</tbody></table>';
+  }else{html+='<p class="empty">none</p>'}
+  html+='</section>';
+
+  document.getElementById('status-root').innerHTML=html;
+}
+
+// ---- Issues ----
+function renderProblem(p){
+  const sev=(p.severity||'error').toLowerCase();
+  let fixBtn='';
+  if(p.needs_login) fixBtn=' <a class="button" href="/login">Log in (still free)</a>';
+  let title=esc(p.title);
+  if(p.pid&&p.title.indexOf('pid '+p.pid)===-1) title+=' <span class="diag-pid">(pid '+esc(p.pid)+')</span>';
+  let fix='';
+  if(p.fix){fix='<div class="diag-fix">'+esc(p.fix);if(p.fix_command) fix+=' - <code>'+esc(p.fix_command)+'</code>';fix+=fixBtn+'</div>'}
+  else if(fixBtn){fix='<div class="diag-fix">'+fixBtn+'</div>'}
+  const detail=p.detail?'<div class="diag-detail">'+esc(p.detail)+'</div>':'';
+  return '<div class="diag diag-'+sev+'"><div class="diag-title">['+sev.toUpperCase()+'] '+title+'</div>'+detail+fix+'</div>';
+}
+function renderIssues(d){
+  const root=document.getElementById('issues-root');
+  if(!d.problems||d.problems.length===0){
+    const ran=d.diagnostics_checks_run;
+    root.innerHTML='<p class="no-issues">no issues detected'+(ran?' ('+ran+' checks passed)':'')+'</p>';
+  }else{
+    root.innerHTML=d.problems.map(renderProblem).join('');
+  }
+}
+
+// ---- Main ----
+function render(d){
+  latestData=d;
+  document.getElementById('hdr-meta').textContent=d.daemon_pid?'pid '+d.daemon_pid:'local daemon';
+  document.getElementById('hdr-ts').textContent='Updated '+new Date().toLocaleTimeString();
+  renderSettings(d);
+  renderDetected(d);
+  renderDownload(d);
+  renderExamples(d);
+  renderTunnels(d);
+  renderIssues(d);
+}
+async function load(){
+  try{
+    const r=await fetch('/status.json');
+    if(r.ok) render(await r.json());
+  }catch(e){
+    document.getElementById('status-root').innerHTML='<p class="loading">Waiting for daemon...</p>';
+  }
+}
+async function loadSpec(){
+  try{
+    const r=await fetch('/openapi.json');
+    if(r.ok) document.getElementById('openapi-spec-code').textContent=await r.text();
+  }catch(e){}
+}
+document.getElementById('download-btn').addEventListener('click',doDownload);
+document.getElementById('console-stop').addEventListener('click',function(){
+  if(activeRun) stopExample(activeRun.id);
+});
+load();
+loadSpec();
+setInterval(load,3000);
+</script>
+</body>
+</html>

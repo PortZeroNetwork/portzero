@@ -1,0 +1,254 @@
+name: CI
+
+on:
+  # CI gates PRs into the long-lived integration branch. Use branch protection
+  # rules on `staging` to require these checks before merge.
+  pull_request:
+    branches:
+      - staging
+  # Manual dispatch for running one job group and/or one runner OS in
+  # isolation — e.g. re-running only the Windows real-TUN E2E entry while
+  # debugging a hang, without paying for the full matrix.
+  workflow_dispatch:
+    inputs:
+      job:
+        description: 'Job group to run'
+        type: choice
+        default: all
+        options:
+          - all
+          - check
+          - e2e
+      os:
+        description: 'Runner OS to target'
+        type: choice
+        default: all
+        options:
+          - all
+          - ubuntu-latest
+          - macos-15
+          - windows-latest
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check & Test (${{ matrix.os }})
+    if: github.event_name != 'workflow_dispatch' || inputs.job == 'all' || inputs.job == 'check'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Run the unprivileged suite on every supported desktop OS. A manual
+        # dispatch with a specific `os` input narrows this to that runner.
+        os: ${{ (github.event_name == 'workflow_dispatch' && inputs.os != 'all') && fromJSON(format('["{0}"]', inputs.os)) || fromJSON('["ubuntu-latest", "macos-15", "windows-latest"]') }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/crates/app/ui/package-lock.json
+
+      # The portzero-tray crate links GTK / libxdo / libayatana-appindicator on
+      # Linux (its tray backend). The portzero-app crate (Tauri v2 desktop app)
+      # additionally links webkit2gtk. These aren't preinstalled on the runner,
+      # so the workspace clippy/test below would fail to compile without them.
+      # macOS and Windows build the winit tray backend and Tauri's native
+      # WKWebView/WebView2 with no extra system packages.
+      - name: Install Linux tray + app GUI deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxdo-dev libayatana-appindicator3-dev libwebkit2gtk-4.1-dev librsvg2-dev
+
+      # Tauri embeds ui/dist into the portzero-app binary at build time via its
+      # build.rs, so the frontend must be built before any cargo command that
+      # touches the portzero-app crate (clippy/test/build below).
+      - name: Install app frontend dependencies
+        working-directory: client/crates/app/ui
+        run: npm ci
+
+      - name: Typecheck app frontend
+        working-directory: client/crates/app/ui
+        run: npm run typecheck --if-present
+
+      - name: Build app frontend
+        working-directory: client/crates/app/ui
+        run: npm run build
+
+      - name: Format
+        if: runner.os == 'Linux'
+        run: cargo fmt -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace -- -D warnings -D clippy::cognitive_complexity
+
+      - name: Tests
+        run: cargo test --workspace
+
+      - name: OpenAPI spec is up to date (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          cargo run -p portzero-daemon --bin generate-openapi
+          git diff --exit-code api/management-v1.yaml
+
+  file-size-budget:
+    name: File-size budget (client/*.rs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check file-size budget
+        run: cargo run -p portzero-xtask --bin check-file-size-budget
+        # See docs/developers/complexity-budgets.md. Same tool `just complexity`
+        # runs locally / in the pre-commit hook, so a PR that passes locally
+        # can't slip past this on CI, and --no-verify can't bypass it here.
+
+  lifecycle-upgrade-linux:
+    name: Lifecycle upgrade (Linux .deb, prior -> new)
+    if: github.event_name != 'workflow_dispatch' || inputs.job == 'all' || inputs.job == 'check'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/crates/app/ui/package-lock.json
+      # portzero-app (the desktop app) is one of cargo-deb's packaged assets
+      # (see client/crates/cli/Cargo.toml), so it must be built here too —
+      # webkit2gtk/GTK for the Tauri build, and the frontend embedded via
+      # build.rs, same as release.yml's "Build portzero-app frontend" step.
+      - name: Install Linux webkit build deps (for portzero-app)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+      - name: Build portzero-app frontend
+        working-directory: client/crates/app/ui
+        run: |
+          npm ci
+          npm run build
+      - run: cargo build --release --bin portzero --bin portzero-tray --bin portzero-app
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+      - name: Build new .deb
+        run: cargo deb -p portzero-cli --no-build
+      - name: Upgrade lifecycle (fetches the latest published release .deb as the
+              prior version via gh; SKIPs cleanly if there is no prior release)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          new_deb="$(ls target/debian/*.deb | head -1)"
+          PORTZERO_DEB_NEW="$new_deb" bash vmtest/scripts/upgrade-linux.sh
+
+  e2e:
+    name: E2E real TUN overlay (${{ matrix.os }})
+    if: github.event_name != 'workflow_dispatch' || inputs.job == 'all' || inputs.job == 'e2e'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Run the privileged real-TUN E2E on every supported desktop OS. A
+        # manual dispatch with a specific `os` input narrows this to that
+        # runner (e.g. job=e2e, os=windows-latest to reproduce the Wintun
+        # bring-up hang in isolation). macOS stays on a GitHub-hosted
+        # macos-15 runner (unlike the unprivileged `check` job's self-hosted
+        # setup, see top of file) because this job's steps run `sudo`:
+        # sudo must never execute directly on the org's one self-hosted
+        # macOS runner, since that box is a developer's personal laptop, not
+        # a throwaway VM. Real-TUN/trust-store coverage that needs sudo on
+        # macOS runs inside the Parallels guest instead (vm-e2e.yml, driven
+        # through vmkit from that same self-hosted runner) rather than
+        # against the host directly.
+        os: ${{ (github.event_name == 'workflow_dispatch' && inputs.os != 'all') && fromJSON(format('["{0}"]', inputs.os)) || fromJSON('["ubuntu-latest", "macos-15", "windows-latest"]') }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build test binary (populate cache as user)
+        run: cargo build -p portzero-daemon --tests
+
+      - name: Ensure TUN device (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          if [ ! -e /dev/net/tun ]; then
+            sudo modprobe tun
+          fi
+
+      - name: Prepare Wintun (Windows only)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $wintunDir = Join-Path $PWD ".wintun"
+          New-Item -ItemType Directory -Force -Path $wintunDir | Out-Null
+          $zip = Join-Path $wintunDir "wintun.zip"
+          Invoke-WebRequest `
+            -Uri "https://www.wintun.net/builds/wintun-0.14.1.zip" `
+            -OutFile $zip `
+            -TimeoutSec 60
+          Expand-Archive -Path $zip -DestinationPath $wintunDir -Force
+          Copy-Item `
+            (Join-Path $wintunDir "wintun\bin\amd64\wintun.dll") `
+            (Join-Path $wintunDir "wintun.dll") `
+            -Force
+          Add-Content $env:GITHUB_PATH $wintunDir
+
+      - name: E2E - real TUN overlay (privileged opt-in)
+        if: runner.os != 'Windows'
+        timeout-minutes: 5
+        run: sudo -E env PORTZERO_REQUIRE_REAL_TUN_E2E=1 $(which cargo) test -p portzero-daemon --test overlay_e2e real_tun_overlay -- --nocapture
+
+      - name: E2E - trust-store install/verify/UNINSTALL lifecycle (Linux)
+        # Brings the overlay up with install_trust:true (the production default),
+        # asserts the local CA actually landed in the OS trust store, then runs
+        # the real `trust uninstall` and asserts it is GONE — the leftover-CA
+        # residue bug the launch audit flagged. Double-gated so ordinary runs
+        # never mutate a trust store; safe here because the ubuntu runner is a
+        # throwaway VM. Linux only: macOS/Windows trust stores need keychain /
+        # cert-store perms better exercised by the Parallels VM harness.
+        if: runner.os == 'Linux'
+        timeout-minutes: 5
+        run: |
+          sudo -E env \
+            PORTZERO_REQUIRE_REAL_TUN_E2E=1 \
+            PORTZERO_REQUIRE_TRUST_LIFECYCLE=1 \
+            $(which cargo) test -p portzero-daemon --test overlay_e2e \
+            real_tun_overlay_trust_lifecycle -- --nocapture
+
+      - name: E2E - real TUN overlay (Windows)
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        shell: pwsh
+        env:
+          PORTZERO_REQUIRE_REAL_TUN_E2E: "1"
+        run: |
+          cargo test -p portzero-daemon --test overlay_e2e real_tun_overlay -- --nocapture
+          $testExitCode = $LASTEXITCODE
+          if ($testExitCode -ne 0) {
+            Write-Host "`n--- Windows network diagnostics ---"
+            Get-NetAdapter -Name "portzero-e2e" -ErrorAction SilentlyContinue | Format-List Name,InterfaceIndex,Status,MacAddress,LinkSpeed
+            Get-NetIPAddress -InterfaceAlias "portzero-e2e" -ErrorAction SilentlyContinue | Format-Table -AutoSize
+            Get-NetRoute -ErrorAction SilentlyContinue | Where-Object { $_.DestinationPrefix -like "10.254.*" } | Format-Table -AutoSize
+            Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object { $_.Namespace -like "*portzero.local*" } | Format-List
+            netsh interface ipv4 show config name="portzero-e2e"
+            exit $testExitCode
+          }

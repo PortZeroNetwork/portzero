@@ -1,0 +1,49 @@
+[package]
+name = "portzero-app"
+version = "0.0.1"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "PortZero desktop app: the local management GUI (Tauri v2) that replaces the browser-based local dashboard."
+repository = "https://github.com/PortZeroNetwork/portzero-local"
+homepage = "https://portzero.cloud"
+
+[[bin]]
+name = "portzero-app"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-single-instance = "2"
+# Blocking reqwest matches how the app's commands run: each Tauri command is
+# already invoked on a worker thread, so a blocking client keeps the proxy
+# logic simple and unit-testable without pulling an async runtime into it.
+# rustls keeps us off the system OpenSSL, matching the rest of the workspace.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+portzero-domain = { path = "../domain" }
+# Used by `set_https` to write the overlay-HTTPS policy to ~/.portzero/config.toml
+# through the same `DaemonConfig` the tray/CLI use, and to read on-disk daemon
+# state for the daemon-down status fallback.
+portzero-daemon = { path = "../daemon" }
+
+[features]
+# Tauri decides at BUILD time whether the webview loads the bundled frontend
+# (ui/dist, embedded at compile time) or a live dev server (`devUrl` in
+# tauri.conf.json, http://localhost:5173). Its build script sets
+# `dev = !custom-protocol`, so WITHOUT this feature every plain `cargo build` /
+# `cargo run` — the release workflow's `cargo build --bin portzero-app`,
+# `just app-build`, and `just app-dev`, none of which run a Vite dev server —
+# produces a binary that comes up pointing at the (absent) dev server and shows
+# a blank window reading "Could not connect to localhost: Connection refused".
+# Making `custom-protocol` a default feature means the compiled binary always
+# serves the embedded assets, which is what every build path here expects.
+#
+# The `tauri` CLI's `tauri dev` disables this via `--no-default-features` to get
+# hot reload; this repo never uses `tauri dev` (it builds ui/dist and runs the
+# binary directly), so there is no dev-server workflow to preserve.
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

@@ -1,0 +1,75 @@
+name: 'PortZero Tunnel Action'
+description: >-
+  Install the PortZero local daemon on a Linux runner, wait for one or more
+  PZ_TUNNEL-tagged processes/containers to become reachable, and expose their
+  URLs as step outputs.
+author: 'PortZero Network'
+branding:
+  icon: 'link'
+  color: 'blue'
+
+inputs:
+  mode:
+    description: >-
+      'start' installs portzero and waits for the given tunnels (default).
+      'teardown' stops the daemon and prints its log for diagnostics — call
+      the action a second time with mode: teardown in a later step guarded by
+      `if: always()`. Composite actions have no automatic post-job hook, so
+      this is an explicit step rather than an implicit one; see README.md.
+    required: false
+    default: 'start'
+  tunnels:
+    description: >-
+      One PZ_TUNNEL domain per line (e.g. `web.myapp.portzero.local`) to wait
+      for. Required when mode is 'start'. These are domains your own
+      process/container already declared via PZ_TUNNEL — portzero has no
+      service concept, so the tunnel domain is the only identity there is.
+      This action does not start your processes/containers for you.
+    required: false
+    default: ''
+  healthy:
+    description: >-
+      Pass --healthy to `portzero wait` (polls PZ_HEALTH_PATH when the
+      tunneled process/container declared one, otherwise just waits for the
+      tunnel to exist).
+    required: false
+    default: 'true'
+  timeout:
+    description: 'Seconds to wait per tunnel before failing (portzero wait --timeout).'
+    required: false
+    default: '60'
+  version:
+    description: >-
+      portzero release version to install, without a leading "v" (e.g.
+      "0.4.0"), or "latest".
+    required: false
+    default: 'latest'
+
+outputs:
+  urls:
+    description: >-
+      Newline-separated resolved URL for each entry in `tunnels`, in the same
+      order (from `portzero url`).
+    value: ${{ steps.run.outputs.urls }}
+  url:
+    description: 'Resolved URL, set only when `tunnels` contained exactly one domain.'
+    value: ${{ steps.run.outputs.url }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: portzero tunnel-action (start)
+      id: run
+      if: inputs.mode == 'start'
+      shell: bash
+      env:
+        PORTZERO_TUNNELS: ${{ inputs.tunnels }}
+        PORTZERO_HEALTHY: ${{ inputs.healthy }}
+        PORTZERO_TIMEOUT: ${{ inputs.timeout }}
+        PORTZERO_VERSION: ${{ inputs.version }}
+      run: ${{ github.action_path }}/scripts/start.sh
+
+    - name: portzero tunnel-action (teardown)
+      if: inputs.mode == 'teardown'
+      shell: bash
+      run: ${{ github.action_path }}/scripts/teardown.sh

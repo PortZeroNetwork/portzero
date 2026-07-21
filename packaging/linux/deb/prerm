@@ -1,0 +1,19 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    remove|purge)
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl --user disable --now portzero-daemon.service 2>/dev/null || true
+        fi
+        # Stop any running tray companion; its /etc/xdg/autostart entry is
+        # removed with the package files.
+        pkill -x portzero-tray 2>/dev/null || true
+        # Stop any running desktop app window; its launcher entry
+        # (/usr/share/applications/portzero.desktop) is removed with the
+        # package files.
+        pkill -x portzero-app 2>/dev/null || true
+        # Remove the portzero.local pin added in postinst.
+        sed -i '/# portzero-local/d' /etc/hosts 2>/dev/null || true
+        ;;
+esac

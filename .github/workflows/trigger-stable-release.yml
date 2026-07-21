@@ -1,0 +1,123 @@
+name: Trigger Stable Release
+
+# Gated **stable** release button (downloadable product). Same production
+# environment gate pattern as portzero-cloud. Stamps the next immutable
+# `vX.Y.Z` tag on the chosen ref (normally `staging`); the tag push triggers
+# release.yml as a **Stable Release** (signed installers + GitHub Release +
+# Homebrew). Unstable builds are automatic on every push to `staging` — this
+# workflow is only for stable.
+#
+# Roll back / re-publish: dispatch again with `ref` set to an existing
+# `vX.Y.Z` tag and `bump: none` — re-dispatches release.yml with
+# channel=stable without cutting a new version.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to release. Blank = the ref this workflow was dispatched from (normally staging). For bump=none: an existing vX.Y.Z tag to re-publish (roll back to).'
+        type: string
+        default: ''
+      bump:
+        description: 'Semver bump for the release tag. Use "none" with ref=<existing vX.Y.Z tag> to re-publish that release without cutting a new tag.'
+        type: choice
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
+          - none
+
+# contents: write to push the vX.Y.Z release tag; actions: write so a
+# bump=none re-publish can dispatch release.yml for an existing tag.
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: trigger-stable-release
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      # Release exactly the requested ref. Blank falls back to the dispatch ref
+      # (github.ref). fetch-depth: 0 brings all tags so the version step can
+      # find the latest vX.Y.Z to bump from.
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          fetch-depth: 0
+
+      # The release of record. A promote (bump != none) stamps an immutable
+      # vX.Y.Z tag on the chosen commit — browsable under Releases/Tags instead
+      # of a release branch. Pushing the tag triggers release.yml (signed build
+      # + GitHub Release).
+      - name: Stamp release tag
+        if: ${{ inputs.bump != 'none' }}
+        env:
+          BUMP: ${{ inputs.bump }}
+          # A tag pushed with the default GITHUB_TOKEN does NOT trigger any
+          # workflow (GitHub's anti-recursion rule), so release.yml would never
+          # fire. Push with a PAT (contents:write on this repo) so the tag event
+          # triggers the release build.
+          RELEASE_TAG_TOKEN: ${{ secrets.RELEASE_TAG_TOKEN }}
+        run: |
+          # Latest stable vX.Y.Z tag across history; default v0.0.0 if none.
+          # Unstable tags (vX.Y.Z-rc.N) are excluded so they never
+          # perturb the next stable bump.
+          LATEST_TAG=$(git tag -l "v[0-9]*.[0-9]*.[0-9]*" | grep -v -- '-' | sort -V | tail -1)
+          LATEST_TAG="${LATEST_TAG:-v0.0.0}"
+          MAJOR=$(echo "$LATEST_TAG" | sed 's/^v//' | cut -d. -f1)
+          MINOR=$(echo "$LATEST_TAG" | cut -d. -f2)
+          PATCH=$(echo "$LATEST_TAG" | cut -d. -f3)
+          case "$BUMP" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+          esac
+          TAG="v${MAJOR}.${MINOR}.${PATCH}"
+          echo "Stamping $TAG on $(git rev-parse --short HEAD) (was $LATEST_TAG)"
+          # Annotated tags need a tagger identity; the default checkout sets none.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $TAG"
+          # Fail loud rather than silently pushing with a token that won't
+          # trigger release.yml (see the RELEASE_TAG_TOKEN note above).
+          if [ -z "${RELEASE_TAG_TOKEN:-}" ]; then
+            echo "::error::RELEASE_TAG_TOKEN secret is not set — a GITHUB_TOKEN tag push would not trigger release.yml. Add a PAT with contents:write as RELEASE_TAG_TOKEN." >&2
+            exit 1
+          fi
+          # actions/checkout persists a GITHUB_TOKEN auth header
+          # (http.<host>.extraheader) that GitHub honors OVER the URL's PAT
+          # credentials, re-attributing the push to GITHUB_TOKEN — which never
+          # triggers workflows. Strip it so the PAT in the URL is what
+          # authenticates the push (and thus triggers release.yml).
+          git config --local --unset-all http.https://github.com/.extraheader || true
+          git push "https://x-access-token:${RELEASE_TAG_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$TAG"
+
+      # Rollback / re-publish: re-run Stable Release for an existing stable
+      # tag. workflow_dispatch is allowed with GITHUB_TOKEN (no PAT). Note:
+      # the dispatched run uses release.yml as of that tag, so this path only
+      # works for tags cut after channel=stable existed; older tags: re-run
+      # their original Stable Release from the Actions UI.
+      - name: Re-publish existing release (bump=none)
+        if: ${{ inputs.bump == 'none' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ inputs.ref }}
+        run: |
+          case "$REF" in
+            v[0-9]*.[0-9]*.[0-9]*) : ;;
+            *)
+              echo "::error::bump=none re-publishes an existing release; set ref to an existing vX.Y.Z tag (got '${REF:-<blank>}')." >&2
+              exit 1
+              ;;
+          esac
+          if ! git rev-parse -q --verify "refs/tags/$REF" >/dev/null; then
+            echo "::error::tag $REF does not exist." >&2
+            exit 1
+          fi
+          echo "Re-dispatching Stable Release for $REF ($(git rev-parse --short "refs/tags/$REF^{commit}"))"
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$REF" -f channel=stable

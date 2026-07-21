@@ -1,0 +1,13 @@
+[Unit]
+Description=Port Zero discovery daemon
+Documentation=https://portzero.cloud/docs/daemon
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/portzero start --foreground
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=default.target

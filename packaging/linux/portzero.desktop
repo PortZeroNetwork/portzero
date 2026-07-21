@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=PortZero
+Comment=Manage Port Zero tunnels to eliminate port conflicts in your dev environment
+Exec=/usr/local/bin/portzero-app
+Icon=portzero
+Terminal=false
+Categories=Network;Utility;

@@ -1,0 +1,29 @@
+[statuses]
+list = ["draft", "todo", "in-progress", "done", "blocked", "archived"]
+default = "todo"
+terminal = ["done", "archived"]
+
+[ticket]
+id_prefix = "task"
+milestone_prefix = "milestone"
+doc_prefix = "doc"
+decision_prefix = "decision"
+default_location = "work"
+
+[[workflow.automations]]
+code = "auto-close-parent"
+enabled = true
+when = { status_becomes = "done" }
+then = { on = "parent", set_status = "done" }
+
+[[workflow.automations]]
+code = "auto-close-milestone"
+enabled = true
+when = { status_becomes = "done" }
+then = { on = "relation_sources", relation = "contains", set_status = "done" }
+
+[[workflow.automations]]
+code = "unblock-dependents"
+enabled = true
+when = { status_becomes = "done" }
+then = { on = "dependents", set_status = "todo" }

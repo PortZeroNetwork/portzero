@@ -1,0 +1,162 @@
+# Parallels VM system-test recipes (host-side; runs on the macOS host that owns
+# the VMs). Import from the top-level justfile.
+#
+# The VM control plane is `vmkit` (brew install portzeronetwork/portzero/vmkit):
+# golden-snapshot ladder, internal-disk-only boot policy, guarded guest exec,
+# one-VM-at-a-time. Machine inventory lives in ~/.config/vmkit/host.conf; what
+# this repo tests lives in ./vmkit.conf (flavors, artifacts, env plumbing).
+# Validate a machine with `vmkit doctor`; docs ship with the kit
+# (`$(brew --prefix)/opt/vmkit/libexec/docs`).
+#
+# These recipes are thin aliases kept for muscle memory + CI stability; the
+# repo-specific pieces that remain here are provisioning (brew/toolchain
+# baking), the offline installer cache, benchmarks, and repro helpers.
+
+_vmtest-help:
+    @just --list --list-heading $'VM system-test recipes (macOS host):\n'
+
+# List all VMs and their snapshots.
+[macos]
+vm-list:
+    vmkit list
+
+# Enforce one-at-a-time, revert to golden, boot, and capture the ready snapshot.
+[macos]
+vm-up vm="windows":
+    vmkit up "{{vm}}"
+
+# Take a RUNNING snapshot as a per-session reset point (e.g. after provisioning).
+[macos]
+vm-checkpoint vm name:
+    vmkit checkpoint "{{vm}}" "{{name}}"
+
+# Revert to a running snapshot (default "ready") and wait until the guest answers.
+[macos]
+vm-reset vm="windows" name="ready":
+    vmkit reset "{{vm}}" "{{name}}"
+
+# One VM reset per platform, covering everything the old separate local /
+# staging / lifecycle / upgrade flavors used to check across four separate
+# resets: install -> local-tunnel test -> upgrade -> cloud-tunnel test ->
+# uninstall, in a single pass (see vmkit.conf VMKIT_FLAVOR_COMBINED_* and
+# vmtest/scripts/combined-{linux,macos,windows}.{sh,ps1}). Installs the prior
+# released package if one is available (else the new one directly, skipping
+# the upgrade step), and SKIPs the cloud-tunnel step cleanly if no staging
+# seed token is available (or set COMBINED_SKIP_CLOUD=1 to skip it outright).
+# Resets each VM to its "built" checkpoint first.
+#   just vm-test            # all platforms, in series
+#   just vm-test linux
+[macos]
+vm-test platform="":
+    vmkit series combined "{{platform}}"
+
+# Ad-hoc single-flavor debugging: run just the local-overlay smoke, the
+# cloud-tunnel smoke, the install/uninstall lifecycle, or the prior->new
+# upgrade check in isolation, instead of the full combined flow `vm-test` runs.
+[macos]
+vm-test-local platform="":
+    vmkit series local "{{platform}}"
+
+# Real cloud-tunnel E2E against staging (throwaway staging account per run).
+# The rotated seed token comes from the offline cache; macOS guests get it
+# pushed in automatically (see vmkit.conf VMKIT_SECRETS_*).
+[macos]
+vm-test-staging platform="":
+    vmkit series staging "{{platform}}"
+
+# Full install -> verify -> UNINSTALL -> assert-clean lifecycle against the
+# REAL installer (.deb / signed MSI / brew+setup), in isolation (no upgrade,
+# no tunnel tests). Artifacts must be staged where vmkit.conf's
+# VMKIT_ARTIFACT_* point (vm-e2e.yml does this in CI).
+[macos]
+vm-test-lifecycle platform="":
+    vmkit series lifecycle "{{platform}}"
+
+# Upgrade coverage in isolation (no tunnel tests): prior released version ->
+# new build, assert the in-place upgrade duplicated nothing. SKIPs cleanly
+# when no prior artifact is available.
+[macos]
+vm-test-upgrade platform="":
+    vmkit series upgrade "{{platform}}"
+
+# Reset to a checkpoint, then run an arbitrary repo script in the guest.
+[macos]
+vm-test-script vm script checkpoint="built" *ARGS:
+    vmkit reset "{{vm}}" "{{checkpoint}}"
+    VMKIT_RUN_TIMEOUT=${VMKIT_RUN_TIMEOUT:-360} vmkit run "{{vm}}" "{{script}}" {{ARGS}}
+
+# Run a repo script in the guest WITHOUT resetting (ad-hoc).
+[macos]
+vm-run vm script *ARGS:
+    vmkit run "{{vm}}" "{{script}}" {{ARGS}}
+
+# Raw command in the guest.
+[macos]
+vm-exec vm +CMD:
+    vmkit exec "{{vm}}" {{CMD}}
+
+# Power off a VM.
+[macos]
+vm-stop vm="windows":
+    vmkit stop "{{vm}}"
+
+# Report what dev tooling is present in the guest.
+[macos]
+vm-inventory vm="windows":
+    vmkit run "{{vm}}" vmtest/scripts/inventory.ps1
+
+# Download-what's-missing into the offline cache (see fetch-installers.sh).
+[macos]
+vm-fetch:
+    bash vmtest/scripts/fetch-installers.sh
+
+# Reproduce the Windows trust-install hang (the v0.1.0 CI blocker) in the guest.
+[macos]
+vm-repro-trust vm="windows":
+    vmkit run "{{vm}}" vmtest/scripts/repro-trust-install.ps1
+
+# One-time provisioning: bake Homebrew into the macOS VM's "portzero-built"
+# reset point. Preserves the pristine pre-Homebrew state as a snapshot first.
+# After it finishes, power off + `just vm-sync-macos` to mirror to the archive.
+[macos]
+vm-macos-add-brew:
+    bash vmtest/scripts/macos-add-brew.sh
+
+# One-time provisioning: bake Windows Defender exclusions (install dir + the
+# artifact drop dir + portzero.exe) into the Windows VM's "portzero-built" reset
+# point, so the intentionally UNSIGNED MSI — installed off the \\Mac\Home share,
+# hence Mark-of-the-Web tagged — can install and launch without Defender's
+# heuristic engine blocking it ("...file contains a virus..."). Baked into the
+# checkpoint via `vmkit provision` so it survives every `vm-test` reset; the
+# pristine pre-exclusion state is preserved as `portzero-built-pre-defender`.
+[macos]
+vm-windows-add-defender-exclusions:
+    vmkit provision windows vmtest/scripts/windows-add-defender-exclusions.ps1 \
+        --checkpoint built --label defender
+
+# Mirror the macOS VM + its cache from the internal disk to the archive drive.
+# VM must be powered off. Pass --dry-run / --delete through.
+[macos]
+vm-sync-macos *ARGS:
+    bash vmtest/scripts/sync-macos-to-4tb.sh {{ARGS}}
+
+# Copy the Windows archive to a fast throwaway internal clone for benchmarking
+# clone speed (NOT the same as the working copy vmkit adopt restores).
+[macos]
+vm-copy-internal:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if prlctl list -i "Windows 11 Pro verify" >/dev/null 2>&1; then
+        echo ">> removing existing internal copy first"; prlctl delete "Windows 11 Pro verify" >/dev/null 2>&1 || true
+    fi
+    bash vmtest/scripts/bench.sh record copy-win11-to-internal "Windows 11 Pro archive" -- \
+        prlctl clone "Windows 11 Pro archive" --name "Windows 11 Pro verify" --dst "$HOME/Parallels"
+
+# Delete the internal throwaway copy to reclaim SSD space (bench-measured).
+[macos]
+vm-delete-internal:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    prlctl stop "Windows 11 Pro verify" --fast >/dev/null 2>&1 || true
+    bash vmtest/scripts/bench.sh record delete-win11-internal "Windows 11 Pro verify" -- \
+        prlctl delete "Windows 11 Pro verify"

@@ -1,0 +1,6 @@
+[advisories]
+# quick-xml is reachable only through this impossible target combination:
+# portzero-tray enables winit only when not Linux, while winit enables
+# wayland-scanner (and quick-xml) only on Linux. Cargo.lock records both sides,
+# so cargo-audit cannot infer that quick-xml is never compiled.
+ignore = ["RUSTSEC-2026-0194", "RUSTSEC-2026-0195"]
