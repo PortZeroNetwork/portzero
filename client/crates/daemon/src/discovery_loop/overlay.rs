@@ -168,8 +168,10 @@ pub(super) async fn gather_and_publish_issues(
     all.extend(legacy_cache.iter().cloned());
     // Real-time Docker port-bind conflicts caught by the event monitor (task-8).
     all.extend(docker_conflicts);
-    // Invalidly-scoped PZ_TUNNEL cloud tunnel domains found on this scan
-    // (e.g. myservice.portzero.cloud instead of myservice--<cloud-username>.tunnel.portzero.cloud).
+    // Cloud-side issues found while scanning routes this pass: invalidly-scoped
+    // PZ_TUNNEL cloud tunnel domains (e.g. myservice.portzero.cloud instead of
+    // myservice.<cloud-username>.tunnel.portzero.cloud) and duplicate cloud
+    // tunnel URLs claimed by more than one context.
     all.extend(cloud_scope_issues);
     publish_issues(all, config, notified_issues);
 }
