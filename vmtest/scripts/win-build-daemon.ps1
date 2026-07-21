@@ -4,9 +4,9 @@
 # building over SMB and the host's root-owned target/). Idempotent-ish: re-syncs
 # source each run so edits on the host are picked up. Prints KEY=value lines.
 $ErrorActionPreference = 'Stop'
-$repoUnc   = '\\Mac\Home\Documents\src\PortZeroNetwork\portzero-local'
+$repoUnc   = '\\Mac\Home\Documents\src\PortZeroNetwork\portzero'
 $vendorUnc = '\\Mac\MBP-Sidecar\loumtech\vm-toolchain-cache\common\vendor'
-$src       = 'C:\src\portzero-local'
+$src       = 'C:\src\portzero'
 $vendor    = 'C:\vendor'
 $cargoHome = 'C:\cargo-home'
 

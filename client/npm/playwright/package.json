@@ -13,7 +13,7 @@
   "homepage": "https://portzero.net",
   "repository": {
     "type": "git",
-    "url": "https://github.com/PortZeroNetwork/portzero-local.git",
+    "url": "https://github.com/PortZeroNetwork/portzero.git",
     "directory": "client/npm/playwright"
   },
   "type": "commonjs",

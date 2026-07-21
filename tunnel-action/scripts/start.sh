@@ -18,9 +18,9 @@ fi
 
 version="${PORTZERO_VERSION:-latest}"
 if [[ "$version" == "latest" ]]; then
-  install_url="https://github.com/PortZeroNetwork/portzero-local/releases/latest/download/linux-install.sh"
+  install_url="https://github.com/PortZeroNetwork/portzero/releases/latest/download/linux-install.sh"
 else
-  install_url="https://github.com/PortZeroNetwork/portzero-local/releases/download/v${version}/linux-install.sh"
+  install_url="https://github.com/PortZeroNetwork/portzero/releases/download/v${version}/linux-install.sh"
 fi
 
 echo "::group::Install portzero (${version})"

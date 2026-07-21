@@ -16,7 +16,7 @@ Commands:
 - portzero-app
 Installers:
 - Architecture: x64
-  InstallerUrl: https://github.com/PortZeroNetwork/portzero-local/releases/download/v0.1.0/portzero-0.1.0-x86_64.msi
+  InstallerUrl: https://github.com/PortZeroNetwork/portzero/releases/download/v0.1.0/portzero-0.1.0-x86_64.msi
   InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
   ProductCode: '{00000000-0000-0000-0000-000000000000}'
   AppsAndFeaturesEntries:

@@ -120,7 +120,7 @@ find_deb() {
 fetch_prior_deb() { # best-effort fetch of the latest published release .deb
     command -v gh >/dev/null 2>&1 || return 1
     local out; out="$(mktemp -d)"
-    gh release download --repo PortZeroNetwork/portzero-local \
+    gh release download --repo PortZeroNetwork/portzero \
         --pattern '*.deb' --dir "$out" >/dev/null 2>&1 || return 1
     local d; d="$(find "$out" -name '*.deb' | head -1)"
     [ -n "$d" ] && { printf '%s\n' "$d"; return 0; }

@@ -8,7 +8,7 @@ param(
 
     [string] $OutputRoot = (Join-Path $PSScriptRoot "..\packaging\winget\manifests\p\PortZeroNetwork\PortZero"),
 
-    [string] $Repo = "PortZeroNetwork/portzero-local",
+    [string] $Repo = "PortZeroNetwork/portzero",
 
     [string] $UpgradeCode = "{8D64B464-96F7-4CB9-A452-372F0AC067AF}"
 )

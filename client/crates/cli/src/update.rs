@@ -13,7 +13,7 @@ use anyhow::Result;
 use serde::Deserialize;
 use tokio::time::timeout;
 
-const RELEASES_BASE_URL: &str = "https://github.com/PortZeroNetwork/portzero-local/releases";
+const RELEASES_BASE_URL: &str = "https://github.com/PortZeroNetwork/portzero/releases";
 
 /// Minimum interval between remote checks.
 const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -206,8 +206,8 @@ mod tests {
     fn test_releases_base_url_points_to_correct_repo() {
         // Verify the URL points to the correct organization and repo, not the old one
         assert!(
-            RELEASES_BASE_URL.contains("PortZeroNetwork/portzero-local"),
-            "RELEASES_BASE_URL must contain PortZeroNetwork/portzero-local, got: {}",
+            RELEASES_BASE_URL.contains("PortZeroNetwork/portzero"),
+            "RELEASES_BASE_URL must contain PortZeroNetwork/portzero, got: {}",
             RELEASES_BASE_URL
         );
         assert!(
@@ -225,9 +225,9 @@ mod tests {
         let url = version_url();
         assert_eq!(
             url,
-            "https://github.com/PortZeroNetwork/portzero-local/releases/latest/download/version.json"
+            "https://github.com/PortZeroNetwork/portzero/releases/latest/download/version.json"
         );
-        assert!(url.contains("PortZeroNetwork/portzero-local"));
+        assert!(url.contains("PortZeroNetwork/portzero"));
         assert!(url.contains("/latest/download/version.json"));
     }
 

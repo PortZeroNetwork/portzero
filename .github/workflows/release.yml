@@ -1016,7 +1016,7 @@ jobs:
           > This is an **unstable build cut off `staging`** for testing installers.
           > It is not a supported release. Stable users are never directed or
           > updated here. It talks to the **production** portzero.cloud, same as
-          > stable. See [docs/developers/unstable-channel.md](https://github.com/PortZeroNetwork/portzero-local/blob/staging/docs/developers/unstable-channel.md).
+          > stable. See [docs/developers/unstable-channel.md](https://github.com/PortZeroNetwork/portzero/blob/staging/docs/developers/unstable-channel.md).
 
           **macOS (Homebrew — unstable formula `portzero-edge`)**
           ```sh
@@ -1031,7 +1031,7 @@ jobs:
 
           **Linux**
           ```sh
-          curl -fsSL https://github.com/PortZeroNetwork/portzero-local/releases/latest/download/linux-install.sh | PORTZERO_CHANNEL=prerelease sh
+          curl -fsSL https://github.com/PortZeroNetwork/portzero/releases/latest/download/linux-install.sh | PORTZERO_CHANNEL=prerelease sh
           ```
 
           **Windows**
@@ -1044,7 +1044,7 @@ jobs:
             cat > artifacts/NOTES.md <<'EOF'
           ## Install
 
-          > **Local** (`*.portzero.local`) is free, open-source software under the [GNU GPL v3.0](https://github.com/PortZeroNetwork/portzero-local/blob/staging/LICENSE).
+          > **Local** (`*.portzero.local`) is free, open-source software under the [GNU GPL v3.0](https://github.com/PortZeroNetwork/portzero/blob/staging/LICENSE).
           > **Cloud** features are governed by the [Port Zero Terms of Service](https://portzero.net/terms).
 
           **macOS (Homebrew)**
@@ -1068,7 +1068,7 @@ jobs:
 
           Offline, or want to pin a specific release? Run the release-asset installer directly instead:
           ```sh
-          curl -fsSL https://github.com/PortZeroNetwork/portzero-local/releases/latest/download/linux-install.sh | sh
+          curl -fsSL https://github.com/PortZeroNetwork/portzero/releases/latest/download/linux-install.sh | sh
           ```
 
           Uninstall:
@@ -1077,7 +1077,7 @@ jobs:
           ```
           Or run the release asset directly:
           ```sh
-          curl -fsSL https://github.com/PortZeroNetwork/portzero-local/releases/latest/download/linux-uninstall.sh | sh
+          curl -fsSL https://github.com/PortZeroNetwork/portzero/releases/latest/download/linux-uninstall.sh | sh
           ```
 
           **Windows**
@@ -1140,7 +1140,7 @@ jobs:
           installers-regex: 'portzero-.*-x86_64\.msi$'
           version: ${{ needs.version.outputs.version }}
           release-tag: ${{ needs.version.outputs.tag }}
-          release-repository: portzero-local
+          release-repository: portzero
           token: ${{ secrets.WINGET_TOKEN }}
           fork-user: PortZeroNetwork
 
@@ -1167,7 +1167,7 @@ jobs:
           pattern: sha256-portzero-darwin-*
           merge-multiple: true
 
-      - name: Checkout portzero-local (unstable formula template)
+      - name: Checkout portzero (unstable formula template)
         if: ${{ needs.version.outputs.prerelease == 'true' }}
         uses: actions/checkout@v5
         with:

@@ -55,7 +55,7 @@ There is one clean boundary, and it is the **golden powered-off snapshot**:
   human at the Parallels GUI, and it changes rarely.
 - **Everything after golden is the repo's job.** All provisioning (toolchains,
   the offline caches, Homebrew), every running snapshot (`ready`/`built`/…), and
-  every test is scripted under `vmtest/` and checked into `portzero-local`. Given
+  every test is scripted under `vmtest/` and checked into `portzero`. Given
   a golden VM on the host, `just vm-…` recipes reproduce the entire rest of the
   state — nothing downstream of golden should require manual GUI steps.
 

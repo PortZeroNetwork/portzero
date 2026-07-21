@@ -140,7 +140,7 @@ function Fetch-PriorMsi {
     if (-not (Get-Command gh -ErrorAction SilentlyContinue)) { return $null }
     $out = Join-Path $env:TEMP ("pz-prior-msi-" + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force -Path $out | Out-Null
-    & gh release download --repo PortZeroNetwork/portzero-local --pattern '*.msi' --dir $out 2>&1 | Out-Null
+    & gh release download --repo PortZeroNetwork/portzero --pattern '*.msi' --dir $out 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { return $null }
     $msi = Get-ChildItem -Path $out -Filter '*.msi' -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($msi) { return $msi.FullName }

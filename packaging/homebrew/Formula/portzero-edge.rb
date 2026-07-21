@@ -17,11 +17,11 @@ class PortzeroEdge < Formula
 
   on_macos do
     on_arm do
-      url "https://github.com/PortZeroNetwork/portzero-local/releases/download/v#{version}/portzero-darwin-arm64.tar.gz"
+      url "https://github.com/PortZeroNetwork/portzero/releases/download/v#{version}/portzero-darwin-arm64.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000" # arm64
     end
     on_intel do
-      url "https://github.com/PortZeroNetwork/portzero-local/releases/download/v#{version}/portzero-darwin-amd64.tar.gz"
+      url "https://github.com/PortZeroNetwork/portzero/releases/download/v#{version}/portzero-darwin-amd64.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000" # x86_64
     end
   end

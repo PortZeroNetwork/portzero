@@ -108,7 +108,7 @@ fn main() -> Result<()> {
         .join("../portzero-examples")
         .canonicalize()
         .context(
-            "resolve ../portzero-examples; clone it next to portzero-local before running this",
+            "resolve ../portzero-examples; clone it next to portzero before running this",
         )?;
 
     let examples = discover_examples(&examples_root)?;

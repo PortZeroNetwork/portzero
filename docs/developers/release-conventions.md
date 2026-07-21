@@ -3,7 +3,7 @@
 > This document is the canonical description of the staging → trigger stable
 > → build model used by PortZero repositories. It is written to be lifted
 > verbatim into any new product. `portzero-cloud` (deployed service) and
-> `portzero-local` (distributed artifact) are the two reference
+> `portzero` (distributed artifact) are the two reference
 > implementations; keep the two copies of this file in sync.
 
 ## The model
@@ -31,7 +31,7 @@
 
 The same names cover both kinds of product:
 
-| | Deployed service (`portzero-cloud`) | Distributed artifact (`portzero-local`) |
+| | Deployed service (`portzero-cloud`) | Distributed artifact (`portzero`) |
 |---|---|---|
 | "Trigger Stable Release" means | Deploy the ref to the production infra, health-check it, then stamp `vX.Y.Z` | Stamp `vX.Y.Z` on the ref (the gate is the whole act) |
 | Build workflow does | Build/publish artifacts for the record | Build signed installers, publish the GitHub Release, bump Homebrew/WinGet |

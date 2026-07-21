@@ -1,6 +1,6 @@
 # Development
 
-These instructions are for contributors to portzero-local itself.
+These instructions are for contributors to portzero itself.
 
 The project uses `just` as the task runner everywhere. Run `just --list` to see available commands.
 

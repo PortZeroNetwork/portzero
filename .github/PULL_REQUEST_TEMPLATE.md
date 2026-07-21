@@ -12,7 +12,7 @@
 
 ## Checklist
 
-- [ ] I have read the [CONTRIBUTING.md](https://github.com/PortZeroNetwork/portzero-local/blob/staging/CONTRIBUTING.md)
+- [ ] I have read the [CONTRIBUTING.md](https://github.com/PortZeroNetwork/portzero/blob/staging/CONTRIBUTING.md)
 - [ ] My code follows the style and conventions of this project
 - [ ] I have added or updated tests as appropriate
 - [ ] All existing tests pass (`just test` or equivalent)

@@ -53,7 +53,7 @@ curl -fsSL https://portzero.net/install.sh | sh
 
 Offline, or want to pin a specific release? Run the release-asset installer directly instead:
 ```sh
-curl -fsSL https://github.com/PortZeroNetwork/portzero-local/releases/latest/download/linux-install.sh | sh
+curl -fsSL https://github.com/PortZeroNetwork/portzero/releases/latest/download/linux-install.sh | sh
 ```
 
 Uninstall:
@@ -62,12 +62,12 @@ Uninstall:
 ```
 Or run the release asset directly:
 ```sh
-curl -fsSL https://github.com/PortZeroNetwork/portzero-local/releases/latest/download/linux-uninstall.sh | sh
+curl -fsSL https://github.com/PortZeroNetwork/portzero/releases/latest/download/linux-uninstall.sh | sh
 ```
 
 **Windows**
 
-Download `portzero-<version>-x86_64.msi` from the [latest GitHub release](https://github.com/PortZeroNetwork/portzero-local/releases/latest) and run it. (winget publishing is coming soon.)
+Download `portzero-<version>-x86_64.msi` from the [latest GitHub release](https://github.com/PortZeroNetwork/portzero/releases/latest) and run it. (winget publishing is coming soon.)
 
 The installer and daemon perform local setup automatically where supported.
 

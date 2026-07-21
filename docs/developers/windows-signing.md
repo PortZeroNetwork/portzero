@@ -170,7 +170,7 @@ Suggested context:
 ```text
 Port Zero is a local development networking CLI. It creates a local overlay and
 uses wintun.dll for Windows TUN support. These are official signed release
-artifacts built from https://github.com/PortZeroNetwork/portzero-local.
+artifacts built from https://github.com/PortZeroNetwork/portzero.
 ```
 
 ## Local diagnostic commands

@@ -5,11 +5,11 @@ PackageVersion: 0.1.0
 PackageLocale: en-US
 Publisher: Port Zero Network
 PublisherUrl: https://portzero.cloud/
-PublisherSupportUrl: https://github.com/PortZeroNetwork/portzero-local/issues
+PublisherSupportUrl: https://github.com/PortZeroNetwork/portzero/issues
 PackageName: PortZero
 PackageUrl: https://portzero.cloud/
 License: GPL-3.0-or-later
-LicenseUrl: https://github.com/PortZeroNetwork/portzero-local/blob/staging/LICENSE
+LicenseUrl: https://github.com/PortZeroNetwork/portzero/blob/staging/LICENSE
 Copyright: Copyright (c) Loum Technologies, LLC
 ShortDescription: Eliminate port conflicts in local dev environments
 Description: |

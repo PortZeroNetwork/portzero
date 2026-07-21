@@ -76,7 +76,7 @@ fetch_prior_binary() {
     local arch tar_arch; arch="$(uname -m)"
     case "$arch" in arm64|aarch64) tar_arch=arm64 ;; *) tar_arch=amd64 ;; esac
     local out; out="$(mktemp -d)"
-    gh release download --repo PortZeroNetwork/portzero-local \
+    gh release download --repo PortZeroNetwork/portzero \
         --pattern "portzero-darwin-${tar_arch}.tar.gz" --dir "$out" >/dev/null 2>&1 || return 1
     local t; t="$(find "$out" -name '*.tar.gz' | head -1)"
     [ -n "$t" ] || return 1

@@ -1,6 +1,6 @@
 # Target audience: developers
 
-People who **work on** the portzero-local codebase: contributors and maintainers
+People who **work on** the portzero codebase: contributors and maintainers
 changing the client, daemon, CI, packaging, and release pipelines.
 
 Assume familiarity with Rust, GitHub Actions, and this repo’s layout. Prefer

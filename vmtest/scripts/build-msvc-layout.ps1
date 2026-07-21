@@ -4,7 +4,7 @@
 # Only downloads; installs nothing. Idempotent: re-running resumes/repairs.
 $ErrorActionPreference = 'Stop'
 
-$layout = '\\Mac\Home\Documents\src\PortZeroNetwork\portzero-local\vmtest\cache\vs_layout'
+$layout = '\\Mac\Home\Documents\src\PortZeroNetwork\portzero\vmtest\cache\vs_layout'
 $boot   = 'C:\Windows\Temp\vs_BuildTools.exe'
 
 $args = @(

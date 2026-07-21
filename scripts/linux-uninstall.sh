@@ -4,7 +4,7 @@ set -e
 # portzero Linux uninstaller.
 #
 # Usage:
-#   curl -fsSL https://github.com/PortZeroNetwork/portzero-local/releases/latest/download/linux-uninstall.sh | sh
+#   curl -fsSL https://github.com/PortZeroNetwork/portzero/releases/latest/download/linux-uninstall.sh | sh
 #
 # Removes the Linux setup performed by scripts/linux-install.sh where possible.
 # Env: PORTZERO_INSTALL_DIR adds an install directory to the binary search path.

@@ -6,13 +6,13 @@ set -e
 # Usage: curl -fsSL https://portzero.net/install.sh | sh
 #   (portzero.net/install.sh serves this file, published as a GitHub
 #    Release asset at:
-#      https://github.com/PortZeroNetwork/portzero-local/releases/latest/download/linux-install.sh)
+#      https://github.com/PortZeroNetwork/portzero/releases/latest/download/linux-install.sh)
 #
 # Downloads the latest portzero binary from GitHub Releases. POSIX sh.
 #
 # Env: PORTZERO_INSTALL_DIR overrides the install directory.
 
-REPO="PortZeroNetwork/portzero-local"
+REPO="PortZeroNetwork/portzero"
 RELEASES_URL="https://github.com/${REPO}/releases"
 
 # --- Colors (only on a terminal) ---
@@ -598,7 +598,7 @@ esac
 
 echo ""
 info "Local tunnels (*.portzero.local) governed by the GNU General Public License v3.0:"
-info "  https://github.com/PortZeroNetwork/portzero-local/blob/staging/LICENSE"
+info "  https://github.com/PortZeroNetwork/portzero/blob/staging/LICENSE"
 info "Cloud features governed by https://portzero.net/terms"
 
 echo ""

@@ -4,8 +4,8 @@
 # and vendored crates locally, build fully offline. Idempotent. Prints KEY=value.
 set -euo pipefail
 CACHE=/media/psf/MBP-Sidecar/loumtech/vm-toolchain-cache
-REPO=/media/psf/Home/Documents/src/PortZeroNetwork/portzero-local
-SRC=/root/src/portzero-local
+REPO=/media/psf/Home/Documents/src/PortZeroNetwork/portzero
+SRC=/root/src/portzero
 VENDOR=/root/vendor
 export PATH=/usr/local/bin:$PATH
 

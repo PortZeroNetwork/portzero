@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "System-tray companion for the PortZero local tunnel daemon: shows daemon health, surfaces issues, and offers one-click start/restart/stop and HTTPS control."
-repository = "https://github.com/PortZeroNetwork/portzero-local"
+repository = "https://github.com/PortZeroNetwork/portzero"
 homepage = "https://portzero.cloud"
 
 [[bin]]

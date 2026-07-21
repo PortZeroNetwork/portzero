@@ -55,7 +55,7 @@ Return to stable: `brew uninstall portzero-edge && brew install portzero`.
 ### Linux — install script
 
 ```sh
-curl -fsSL https://github.com/PortZeroNetwork/portzero-local/releases/latest/download/linux-install.sh | PORTZERO_CHANNEL=prerelease sh
+curl -fsSL https://github.com/PortZeroNetwork/portzero/releases/latest/download/linux-install.sh | PORTZERO_CHANNEL=prerelease sh
 ```
 
 (`PORTZERO_CHANNEL=prerelease` is the install-script switch for the **unstable** channel.)
