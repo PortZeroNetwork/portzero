@@ -54,11 +54,14 @@ fn main() -> Result<()> {
         if !path.is_file() {
             continue;
         }
-        let contents = fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let contents =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         let lines = contents.lines().count();
         if lines > max_lines {
-            println!("FAIL: {} has {lines} lines (budget: {max_lines})", file.display());
+            println!(
+                "FAIL: {} has {lines} lines (budget: {max_lines})",
+                file.display()
+            );
             failed = true;
         }
     }

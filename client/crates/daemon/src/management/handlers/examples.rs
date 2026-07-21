@@ -425,11 +425,12 @@ async fn spawn_streaming_example(
     let compose_workdir = uses_docker_compose.then(|| workdir.clone());
 
     let cancel = Arc::new(Notify::new());
-    state
-        .running_examples
-        .lock()
-        .await
-        .insert(id.clone(), RunningExample { cancel: cancel.clone() });
+    state.running_examples.lock().await.insert(
+        id.clone(),
+        RunningExample {
+            cancel: cancel.clone(),
+        },
+    );
 
     // Echo the commands the user is running, so the console reads like a shell.
     let _ = tx
@@ -545,9 +546,7 @@ async fn supervise(
     // SIGKILL to the process group never reaches them. Compose is the only
     // thing that knows which containers belong to this run.
     if let Some(workdir) = compose_workdir {
-        let _ = tx
-            .send(line_event("$ docker compose down"))
-            .await;
+        let _ = tx.send(line_event("$ docker compose down")).await;
         match tokio::process::Command::new("docker")
             .args(["compose", "down"])
             .current_dir(workdir)
@@ -568,7 +567,9 @@ async fn supervise(
             }
             Err(e) => {
                 let _ = tx
-                    .send(line_event(format!("$ docker compose down failed to start: {e}")))
+                    .send(line_event(format!(
+                        "$ docker compose down failed to start: {e}"
+                    )))
                     .await;
             }
         }

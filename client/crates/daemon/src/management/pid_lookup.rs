@@ -158,14 +158,27 @@ fn pid_for_source_port_impl(_source_port: u16) -> Option<u32> {
 
 /// Return `true` if a process with the given PID is currently running.
 pub fn pid_is_alive(pid: u32) -> bool {
+    // PID 0 is never a real process to probe, and it is what a truncated or
+    // corrupt pidfile reads back as. It must not be reported alive: on macOS
+    // POSIX gives `kill(0, sig)` the special meaning "every process in the
+    // caller's process group", so the probe below would succeed and the caller
+    // would treat its own stale lock as permanently held.
+    if pid == 0 {
+        return false;
+    }
     #[cfg(target_os = "linux")]
     {
         std::path::Path::new(&format!("/proc/{}", pid)).exists()
     }
     #[cfg(target_os = "macos")]
     {
-        // kill(pid, 0) returns 0 if the process exists and we have permission to signal it.
-        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+        // kill(pid, 0) returns 0 if the process exists and we have permission
+        // to signal it. Convert rather than cast: a pid past i32::MAX would
+        // wrap negative, which POSIX reads as "the process GROUP -pid".
+        match libc::pid_t::try_from(pid) {
+            Ok(p) => unsafe { libc::kill(p, 0) == 0 },
+            Err(_) => false,
+        }
     }
     #[cfg(target_os = "windows")]
     {

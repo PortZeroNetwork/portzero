@@ -37,6 +37,15 @@ fn write_atomic(path: &Path, content: &[u8], mode: u32) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("{} has no parent directory", path.display()))?;
+    // The parent check above is worth doing everywhere — without a parent there
+    // is no sibling to rename from — but the BINDING is unix-only (fsync of the
+    // directory entry), as is `mode` (a POSIX permission bitmask). Discard both
+    // off-unix so `-D warnings` doesn't fail the Windows build.
+    #[cfg(not(unix))]
+    {
+        let _ = parent;
+        let _ = mode;
+    }
     let tmp = random_sibling(path);
 
     let mut options = std::fs::OpenOptions::new();

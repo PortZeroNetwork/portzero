@@ -10,6 +10,7 @@ use tokio::time::Duration;
 
 mod agent_mcp;
 mod checks;
+mod checks_tls_trust;
 mod probes;
 
 const PORTZERO_LOCAL_DASHBOARD_IP: &str = "10.254.0.2";
@@ -103,9 +104,9 @@ pub async fn run_diagnostics(state_dir: &std::path::Path) -> DiagnosticsReport {
         run!(checks::check_conflicting_vpn_software());
         run!(checks::check_auth_token(&state_dir));
         run!(checks::check_cloud_plan(&state_dir));
-        run!(checks::check_ca_cert_exists());
-        run!(checks::check_local_ca_trust_installation());
-        run!(checks::check_snap_brave_tls_trust());
+        run!(checks_tls_trust::check_ca_cert_exists());
+        run!(checks_tls_trust::check_local_ca_trust_installation());
+        run!(checks_tls_trust::check_snap_brave_tls_trust());
         run!(agent_mcp::check_ai_agent_mcp_registration());
 
         out.sort_by(|a, b| a.severity.cmp(&b.severity));
@@ -321,7 +322,7 @@ mod tests {
         let missing = dir.path().join("snap/brave/old");
         std::fs::create_dir_all(&present).unwrap();
 
-        let found = super::checks::existing_paths([present.clone(), missing]);
+        let found = super::checks_tls_trust::existing_paths([present.clone(), missing]);
 
         assert_eq!(found, vec![present]);
     }

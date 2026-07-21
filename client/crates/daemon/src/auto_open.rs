@@ -118,7 +118,8 @@ impl AutoOpenTracker {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
         }
-        let json = serde_json::to_string_pretty(self).context("Failed to serialize auto-open state")?;
+        let json =
+            serde_json::to_string_pretty(self).context("Failed to serialize auto-open state")?;
         std::fs::write(path, json)
             .with_context(|| format!("Failed to write auto-open state to: {}", path.display()))?;
         Ok(())
@@ -147,7 +148,8 @@ impl AutoOpenTracker {
             // The same identity reappearing — even after the domain flickered
             // out of a scan, or after a daemon restart reloaded this state
             // from disk — is the same tunnel and must not reopen.
-            let is_new = self.opened.get(&url).map(|e| e.identity.as_str()) != Some(identity.as_str());
+            let is_new =
+                self.opened.get(&url).map(|e| e.identity.as_str()) != Some(identity.as_str());
             // Overwriting resets the absence counter and records the current
             // identity.
             self.opened.insert(
@@ -242,7 +244,10 @@ mod tests {
         // considered already-opened (no reopen).
         tracker.reconcile(false, &services);
         assert_eq!(
-            tracker.opened.get("http://api.portzero.local").map(|e| e.misses),
+            tracker
+                .opened
+                .get("http://api.portzero.local")
+                .map(|e| e.misses),
             Some(0)
         );
     }
@@ -309,10 +314,8 @@ mod tests {
 
     #[test]
     fn restarting_the_tracker_from_saved_state_does_not_reopen_existing_tunnels() {
-        let dir = std::env::temp_dir().join(format!(
-            "portzero-auto-open-test-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("portzero-auto-open-test-{}", std::process::id()));
         let path = dir.join("auto_open.json");
 
         let mut tracker = AutoOpenTracker::new();
@@ -324,9 +327,15 @@ mod tests {
         // the same still-running process is reconciled again. It must not be
         // treated as new even though this tracker instance never saw it before.
         let mut restarted = AutoOpenTracker::load(&path);
-        let is_new = restarted.opened.get("http://api.portzero.local").map(|e| e.identity.as_str())
+        let is_new = restarted
+            .opened
+            .get("http://api.portzero.local")
+            .map(|e| e.identity.as_str())
             != Some(service_identity(&services[0]).as_str());
-        assert!(!is_new, "pre-existing tunnel should not look new after restart");
+        assert!(
+            !is_new,
+            "pre-existing tunnel should not look new after restart"
+        );
         restarted.reconcile(true, &services);
         assert_eq!(
             restarted
