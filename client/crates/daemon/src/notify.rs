@@ -1,10 +1,12 @@
 //! Visibility layer: duplicate-name detection, persisted "issues" state, and
 //! best-effort native notifications.
 //!
-//! When the same `*.portzero.local` overlay name is claimed by two different
-//! process contexts (different PID *and* different working directory — i.e.
-//! two worktrees), routing is ambiguous and the user almost certainly meant to
-//! give the worktrees distinct names. This module makes that situation loud:
+//! When the same `*.portzero.local` overlay name — or the same cloud tunnel URL
+//! (`*.tunnel.portzero.cloud`) — is claimed by two different process contexts
+//! (different working directory / container — i.e. two worktrees), routing is
+//! ambiguous: only one claimant can win and the other is silently dropped. The
+//! user almost certainly meant to give the worktrees distinct names. This module
+//! makes that situation loud:
 //!
 //! 1. **Detection** — pure logic over the already-scanned overlay services.
 //! 2. **Persisted state** — `issues.json` in the daemon state dir, following the
@@ -19,7 +21,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::discovery::{DiscoveredNetworkService, ServiceSource};
+use crate::discovery::{DiscoveredNetworkService, DiscoveredService, ServiceSource};
 
 /// A single detected problem the daemon wants to make visible.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,6 +32,17 @@ pub enum Issue {
     DuplicateName {
         /// The overlay name (label) in conflict, e.g. "my-db".
         name: String,
+        /// Human-readable descriptions of each claimant (cwd / container).
+        claimants: Vec<String>,
+    },
+    /// The same cloud tunnel URL (e.g. `api.alice.tunnel.portzero.cloud`) is
+    /// claimed by more than one distinct process context on this machine. The
+    /// route table is keyed by domain, so only one claimant can win — the others
+    /// are silently dropped and their traffic never reaches the tunnel. This is
+    /// the cloud-side analogue of [`Issue::DuplicateName`].
+    DuplicateCloudUrl {
+        /// The cloud tunnel URL in conflict, e.g. "api.alice.tunnel.portzero.cloud".
+        url: String,
         /// Human-readable descriptions of each claimant (cwd / container).
         claimants: Vec<String>,
     },
@@ -120,6 +133,12 @@ impl Issue {
                 claimants.len(),
                 claimants.join(", ")
             ),
+            Issue::DuplicateCloudUrl { url, claimants } => format!(
+                "Duplicate cloud tunnel URL \"{}\" claimed by {} contexts: {}",
+                url,
+                claimants.len(),
+                claimants.join(", ")
+            ),
             Issue::LegacyListener { port, pid, context } => format!(
                 "Port {} is served directly (not via port-zero) by pid {} {}",
                 port, pid, context
@@ -160,7 +179,9 @@ impl Issue {
             Issue::InvalidCloudTunnelScope { pid, .. }
             | Issue::InvalidUsernamePlaceholder { pid, .. }
             | Issue::InvalidResolvedName { pid, .. } => *pid,
-            Issue::DuplicateName { .. } | Issue::DockerPortConflict { .. } => None,
+            Issue::DuplicateName { .. }
+            | Issue::DuplicateCloudUrl { .. }
+            | Issue::DockerPortConflict { .. } => None,
         }
     }
 
@@ -183,6 +204,22 @@ impl Issue {
                  like \"{name}-{{branch}}.portzero.local\" or \"{name}-{{worktree}}.portzero.local\" \
                  so the resolved name differs per checkout."
             ),
+            Issue::DuplicateCloudUrl { url, .. } => {
+                // Show the first label of the URL in the templated suggestion so
+                // the hint reads naturally (e.g. "api" -> "api-{branch}...").
+                let label = url.split('.').next().unwrap_or("service");
+                let rest = url
+                    .strip_prefix(label)
+                    .and_then(|r| r.strip_prefix('.'))
+                    .unwrap_or(url);
+                format!(
+                    "Two or more processes advertise the same cloud tunnel URL, so only one \
+                     can win and the others are silently dropped. Give each a unique PZ_TUNNEL \
+                     — e.g. a template like \"{label}-{{branch}}.{rest}\" so the resolved URL \
+                     differs per checkout — or stop all but one. Run `portzero status` to see \
+                     which context currently owns the URL."
+                )
+            }
             Issue::LegacyListener { port, .. } => format!(
                 "Set PZ_TUNNEL on this process (e.g. \
                  PZ_TUNNEL=my-svc.portzero.local for the local overlay, or \
@@ -311,22 +348,23 @@ pub fn collect_problems(
     problems
 }
 
-/// Render a claimant description for a discovered overlay service. Uses the
-/// existing `ServiceSource` Display for processes (`(~/path)`) and containers.
-fn describe_claimant(svc: &DiscoveredNetworkService) -> String {
-    match &svc.source {
-        ServiceSource::Process { .. } => format!("pid {} {}", svc.pid, svc.source),
-        ServiceSource::Container { .. } => format!("{}", svc.source),
+/// Render a claimant description from a source + pid. Uses the existing
+/// `ServiceSource` Display for processes (`(~/path)`) and containers. Shared by
+/// the overlay-name and cloud-URL duplicate detectors.
+fn describe_claimant(pid: u32, source: &ServiceSource) -> String {
+    match source {
+        ServiceSource::Process { .. } => format!("pid {} {}", pid, source),
+        ServiceSource::Container { .. } => format!("{}", source),
     }
 }
 
 /// A "context key" that distinguishes two genuinely different claimants. Two
-/// entries for the same name are only a *conflict* if they come from different
-/// process contexts — different PID and different cwd (or a container vs a
-/// process). The same process appearing twice, or two scans of the same
-/// worktree, must not be flagged.
-fn context_key(svc: &DiscoveredNetworkService) -> (Option<PathBuf>, Option<String>) {
-    match &svc.source {
+/// entries for the same name/URL are only a *conflict* if they come from
+/// different process contexts — different cwd (or a container vs a process, or
+/// two distinct containers). The same process appearing twice, or two scans of
+/// the same worktree, must not be flagged.
+fn context_key(source: &ServiceSource) -> (Option<PathBuf>, Option<String>) {
+    match source {
         // For processes, the working directory is the worktree identity. PID
         // alone is too noisy (restarts), so the cwd is the primary signal.
         ServiceSource::Process { cwd } => (cwd.clone(), None),
@@ -335,34 +373,69 @@ fn context_key(svc: &DiscoveredNetworkService) -> (Option<PathBuf>, Option<Strin
     }
 }
 
+/// Group claimants by conflict key, returning the distinct-context descriptions
+/// for any key claimed by two or more contexts. Shared core of both duplicate
+/// detectors. `entries` yields `(grouping_key, pid, source)` per claimant.
+fn duplicate_claimants<'a, I>(entries: I) -> BTreeMap<String, Vec<String>>
+where
+    I: IntoIterator<Item = (String, u32, &'a ServiceSource)>,
+{
+    // grouping key -> (distinct context key -> claimant description)
+    let mut by_key: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    for (group, pid, source) in entries {
+        // Stringify the context key so it is Ord and dedups identical contexts.
+        let ctx = format!("{:?}", context_key(source));
+        by_key
+            .entry(group)
+            .or_default()
+            .entry(ctx)
+            .or_insert_with(|| describe_claimant(pid, source));
+    }
+    by_key
+        .into_iter()
+        .filter(|(_, contexts)| contexts.len() >= 2)
+        .map(|(group, contexts)| (group, contexts.into_values().collect()))
+        .collect()
+}
+
 /// Detect duplicate overlay names across distinct process contexts.
 ///
 /// Returns one [`Issue::DuplicateName`] per name that is claimed by two or more
 /// *distinct* contexts in this scan. Pure — operates only on the in-memory
 /// service list, so it is fully unit-testable without privileges or shell-out.
 pub fn detect_duplicate_names(services: &[DiscoveredNetworkService]) -> Vec<Issue> {
-    // name -> (distinct context key -> claimant description)
-    let mut by_name: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    duplicate_claimants(
+        services
+            .iter()
+            .map(|svc| (svc.name.clone(), svc.pid, &svc.source)),
+    )
+    .into_iter()
+    .map(|(name, claimants)| Issue::DuplicateName { name, claimants })
+    .collect()
+}
 
-    for svc in services {
-        let key = context_key(svc);
-        // Stringify the key so it is Ord and dedups identical contexts.
-        let key_str = format!("{:?}", key);
-        by_name
-            .entry(svc.name.clone())
-            .or_default()
-            .entry(key_str)
-            .or_insert_with(|| describe_claimant(svc));
-    }
-
-    let mut issues = Vec::new();
-    for (name, contexts) in by_name {
-        if contexts.len() >= 2 {
-            let claimants: Vec<String> = contexts.into_values().collect();
-            issues.push(Issue::DuplicateName { name, claimants });
-        }
-    }
-    issues
+/// Detect two or more contexts advertising the *same cloud tunnel URL* on this
+/// machine.
+///
+/// The cloud analogue of [`detect_duplicate_names`]. The route table is keyed by
+/// domain, so identical cloud URLs collapse to a single winning route (lowest
+/// pid) and the losers are silently dropped — a footgun that is otherwise
+/// invisible. This runs over the freshly-scanned services *before* that dedup so
+/// both claimants are still present.
+///
+/// Only cloud tunnel domains are considered; `.portzero.local` overlay names are
+/// handled by [`detect_duplicate_names`] and are skipped here to avoid
+/// double-reporting. Pure and fully unit-testable.
+pub fn detect_duplicate_cloud_urls(services: &[DiscoveredService]) -> Vec<Issue> {
+    duplicate_claimants(
+        services
+            .iter()
+            .filter(|svc| !crate::discovery::is_local_overlay_domain(&svc.domain))
+            .map(|svc| (svc.domain.clone(), svc.pid, &svc.source)),
+    )
+    .into_iter()
+    .map(|(url, claimants)| Issue::DuplicateCloudUrl { url, claimants })
+    .collect()
 }
 
 /// Write the current issues to `path`. Best-effort: logs and ignores I/O errors.
@@ -536,6 +609,94 @@ mod tests {
             },
             health_path: None,
         }
+    }
+
+    fn cloud_proc_svc(domain: &str, pid: u32, cwd: Option<&str>) -> DiscoveredService {
+        DiscoveredService {
+            domain: domain.to_string(),
+            domain_template: domain.to_string(),
+            substitutions: Default::default(),
+            port: 8080,
+            extra_ports: Vec::new(),
+            health_path: None,
+            pid,
+            source: ServiceSource::Process {
+                cwd: cwd.map(PathBuf::from),
+            },
+        }
+    }
+
+    #[test]
+    fn test_cloud_same_url_different_cwd_is_duplicate() {
+        // Two worktrees advertising the same cloud URL from distinct contexts.
+        // (The same-cwd dedup and container-vs-process cases share the same core
+        // as detect_duplicate_names and are covered by its tests.)
+        let svcs = vec![
+            cloud_proc_svc(
+                "api.alice.tunnel.portzero.cloud",
+                100,
+                Some("/work/feature-a"),
+            ),
+            cloud_proc_svc(
+                "api.alice.tunnel.portzero.cloud",
+                200,
+                Some("/work/feature-b"),
+            ),
+        ];
+        let issues = detect_duplicate_cloud_urls(&svcs);
+        assert_eq!(issues.len(), 1);
+        match &issues[0] {
+            Issue::DuplicateCloudUrl { url, claimants } => {
+                assert_eq!(url, "api.alice.tunnel.portzero.cloud");
+                assert_eq!(claimants.len(), 2);
+            }
+            other => panic!("unexpected issue: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_cloud_detection_ignores_local_overlay_names() {
+        // `.portzero.local` names are handled by detect_duplicate_names; the
+        // cloud detector must skip them so they are not reported twice.
+        let svcs = vec![
+            cloud_proc_svc("db.portzero.local", 100, Some("/work/a")),
+            cloud_proc_svc("db.portzero.local", 200, Some("/work/b")),
+        ];
+        assert!(detect_duplicate_cloud_urls(&svcs).is_empty());
+    }
+
+    #[test]
+    fn test_cloud_duplicate_url_summary_and_fix_hint() {
+        let issue = Issue::DuplicateCloudUrl {
+            url: "api.alice.tunnel.portzero.cloud".to_string(),
+            claimants: vec!["pid 1 (~/a)".to_string(), "pid 2 (~/b)".to_string()],
+        };
+        assert!(issue.summary().contains("api.alice.tunnel.portzero.cloud"));
+        assert!(issue.summary().contains("2 contexts"));
+        // Fix hint suggests a per-checkout template and points at `portzero status`.
+        assert!(issue
+            .fix_hint()
+            .contains("api-{branch}.alice.tunnel.portzero.cloud"));
+        assert!(issue.fix_hint().contains("portzero status"));
+        assert_eq!(issue.pid(), None);
+        assert!(!issue.needs_login());
+    }
+
+    #[test]
+    fn test_cloud_duplicate_url_is_a_user_facing_problem() {
+        // Unlike LegacyListener, a duplicate cloud URL must surface as a
+        // problem (and therefore fire a notification via publish_issues).
+        let issues = IssuesState {
+            issues: vec![Issue::DuplicateCloudUrl {
+                url: "api.alice.tunnel.portzero.cloud".to_string(),
+                claimants: vec!["pid 1 (~/a)".to_string(), "pid 2 (~/b)".to_string()],
+            }],
+        };
+        let problems = collect_problems(&issues, None);
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0]
+            .title
+            .contains("api.alice.tunnel.portzero.cloud"));
     }
 
     #[test]

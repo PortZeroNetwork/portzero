@@ -711,7 +711,13 @@ async fn reconcile_routes(
         }
     }
 
-    let (mut discovered, cloud_scope_issues) = discovery::scan_all(account_id, username).await;
+    let (mut discovered, mut cloud_scope_issues) = discovery::scan_all(account_id, username).await;
+
+    // Detect two or more contexts advertising the same cloud tunnel URL *before*
+    // `RouteTable::update` collapses them to a single winning route (the losers
+    // are silently dropped). Folded into the cloud-scope issue set so it flows
+    // through the same publish/notify path as duplicate `.portzero.local` names.
+    cloud_scope_issues.extend(notify::detect_duplicate_cloud_urls(&discovered));
 
     // Keep services whose processes have exited but whose grace period hasn't,
     // so a transient scan miss doesn't remove a still-live route.
