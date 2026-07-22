@@ -15,6 +15,7 @@ mod demo_server;
 mod doctor;
 mod export;
 mod frontdoor;
+mod github_repo_login;
 mod inspect;
 mod mcp;
 mod review;
@@ -128,6 +129,21 @@ enum Command {
         /// Display name (only used with --interactive, skips prompt).
         #[arg(long)]
         name: Option<String>,
+
+        /// Authenticate non-interactively by proving push access to a GitHub
+        /// repository (for CI jobs and agent sandboxes). Requires --team.
+        #[arg(long, conflicts_with_all = ["interactive", "email", "name"])]
+        github_repo: bool,
+
+        /// Team slug whose trust rules the repository is checked against
+        /// (required with --github-repo).
+        #[arg(long, requires = "github_repo")]
+        team: Option<String>,
+
+        /// GitHub repository as owner/repo (only used with --github-repo;
+        /// default: parsed from `git remote get-url origin`).
+        #[arg(long, requires = "github_repo")]
+        repo: Option<String>,
     },
     /// Log out and remove stored credentials.
     Logout,
@@ -312,9 +328,17 @@ async fn main() -> anyhow::Result<()> {
             interactive,
             email,
             name,
+            github_repo,
+            team,
+            repo,
         } => {
-            auth::login(interactive, email, name).await?;
-            daemon::restart().await?;
+            if github_repo {
+                // Handles its own daemon restart (only when one is running).
+                github_repo_login::run(team, repo).await?;
+            } else {
+                auth::login(interactive, email, name).await?;
+                daemon::restart().await?;
+            }
         }
         Command::Logout => auth::logout()?,
         Command::Whoami => auth::whoami().await?,
