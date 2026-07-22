@@ -164,8 +164,13 @@ jobs:
           # portzero-app — Tauri's cross-compilation story for GTK/webkit
           # targets is not set up here, and the amd64 Linux archive (which
           # already carries portzero-app) is what packaging (deb/rpm) uses.
+          # Built on ubuntu-22.04 (glibc 2.35) so the amd64 binary runs on
+          # every still-supported Ubuntu LTS. Building on ubuntu-latest
+          # (24.04, glibc 2.39) produced binaries that fail on 22.04 with
+          # "GLIBC_2.38 not found" — caught by the portzero-full-example
+          # local-tunnels CI matrix (task-82).
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
             bins: portzero,portzero-tray,portzero-app
             archive_ext: tar.gz
             archive_name: portzero-linux-amd64

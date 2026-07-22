@@ -157,8 +157,11 @@ start_forwarder() {
     sleep 1
     forwarder_alive || warn "forwarder did not come up; see $DNS_LOG"
   fi
-  # Point the system resolver at the forwarder (backup once).
-  if ! grep -q '^nameserver 127.0.0.1' "$RESOLV" 2>/dev/null; then
+  # Point the system resolver at the forwarder (backup once). Anchor the
+  # match: without the trailing $ this used to match Docker's embedded DNS
+  # (127.0.0.11) and silently skip the repoint, leaving *.portzero.local
+  # unresolvable in container sandboxes.
+  if ! grep -q '^nameserver 127\.0\.0\.1$' "$RESOLV" 2>/dev/null; then
     [ -f "$RESOLV_BACKUP" ] || cp -a "$RESOLV" "$RESOLV_BACKUP"
     printf '# Port Zero split-DNS forwarder for *.portzero.local (orig: resolv.conf.pz-backup)\nnameserver 127.0.0.1\n' > "$RESOLV"
     log "repointed $RESOLV at the forwarder (backup: $RESOLV_BACKUP)"
