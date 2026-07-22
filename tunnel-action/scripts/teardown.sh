@@ -23,4 +23,25 @@ if [[ -f "$log_path" ]]; then
   echo "::endgroup::"
 fi
 
+# Container-job cleanup: the container install path (cloud-agent-env-install.sh)
+# runs a split-DNS forwarder and repoints /etc/resolv.conf at it. Job-scoped
+# containers are destroyed anyway, but undoing both keeps re-runs on a reused
+# container deterministic.
+dns_pidfile="/run/pzlocal-dns.pid"
+if [[ -f "$dns_pidfile" ]]; then
+  dns_pid="$(cat "$dns_pidfile" 2>/dev/null || true)"
+  if [[ -n "$dns_pid" ]]; then
+    kill "$dns_pid" 2>/dev/null || true
+  fi
+  rm -f "$dns_pidfile" || true
+fi
+
+resolv_backup="/etc/resolv.conf.pz-backup"
+if [[ -f "$resolv_backup" ]]; then
+  # /etc/resolv.conf is often a bind mount in containers; write in place
+  # rather than replacing the file.
+  cat "$resolv_backup" > /etc/resolv.conf 2>/dev/null || true
+  rm -f "$resolv_backup" || true
+fi
+
 exit 0

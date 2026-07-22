@@ -44,6 +44,24 @@ inputs:
       "0.4.0"), or "latest".
     required: false
     default: 'latest'
+  oidc-team:
+    description: >-
+      portzero.cloud team slug for cloud-tunnel auth via GitHub OIDC. When
+      non-empty, the action exchanges this job's GitHub OIDC token (audience
+      `portzero.cloud`) for a short-lived scoped tunnel credential before the
+      daemon starts — no long-lived secret in the workflow. Requires
+      `permissions: id-token: write` on the job (or workflow) and an OIDC
+      trust rule for this repository on the team's portzero.cloud settings.
+      See README.md#cloud-tunnels-via-github-oidc.
+    required: false
+    default: ''
+  api-url:
+    description: >-
+      Base URL of the portzero.cloud API used for the OIDC credential
+      exchange. Only change this when targeting a non-production cloud
+      deployment.
+    required: false
+    default: 'https://app.portzero.cloud/api'
 
 outputs:
   urls:
@@ -67,6 +85,8 @@ runs:
         PORTZERO_HEALTHY: ${{ inputs.healthy }}
         PORTZERO_TIMEOUT: ${{ inputs.timeout }}
         PORTZERO_VERSION: ${{ inputs.version }}
+        PORTZERO_OIDC_TEAM: ${{ inputs.oidc-team }}
+        PORTZERO_API_URL: ${{ inputs.api-url }}
       run: ${{ github.action_path }}/scripts/start.sh
 
     - name: portzero tunnel-action (teardown)
