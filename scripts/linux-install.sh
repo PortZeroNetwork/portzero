@@ -138,11 +138,6 @@ install_linux_resolved_polkit_rule() {
     if [ "$(uname -s)" != "Linux" ]; then
         return 0
     fi
-    if [ ! -d /etc/polkit-1/rules.d ]; then
-        warn "polkit rules directory not found; systemd-resolved may prompt for DNS setup at login."
-        return 1
-    fi
-
     user="$(id -un)"
     case "$user" in
         *[!A-Za-z0-9._-]*|'')
@@ -150,6 +145,32 @@ install_linux_resolved_polkit_rule() {
             return 1
             ;;
     esac
+
+    if [ ! -d /etc/polkit-1/rules.d ]; then
+        # polkit <= 0.105 (e.g. Ubuntu 22.04) has no JS rules.d — it reads
+        # .pkla files from localauthority instead (task-87). Without either,
+        # busctl SetLinkDNS is denied and *.portzero.local never resolves.
+        if [ -d /etc/polkit-1/localauthority ]; then
+            pkla_tmp="$tmp/50-portzero-resolved.pkla"
+            cat > "$pkla_tmp" << PKLA
+# Managed by portzero installer.
+# Allows the portzero user service for $user to attach scoped DNS settings
+# to its TUN link without interactive authentication.
+[portzero scoped DNS via systemd-resolved]
+Identity=unix-user:$user
+Action=org.freedesktop.resolve1.set-dns-servers;org.freedesktop.resolve1.set-domains;org.freedesktop.resolve1.revert
+ResultAny=yes
+ResultInactive=yes
+ResultActive=yes
+PKLA
+            if sudo install -D -m 0644 "$pkla_tmp" /etc/polkit-1/localauthority/50-local.d/50-portzero-resolved.pkla 2>/dev/null; then
+                info "Installed polkit localauthority (.pkla) rule for systemd-resolved scoped DNS setup"
+                return 0
+            fi
+        fi
+        warn "polkit rules directory not found; systemd-resolved may prompt for DNS setup at login."
+        return 1
+    fi
 
     rule_tmp="$tmp/50-portzero-resolved.rules"
     cat > "$rule_tmp" << RULE
