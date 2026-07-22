@@ -15,6 +15,7 @@ use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address, Ipv4Cidr};
 use tokio::sync::mpsc;
 
 use crate::net::service_table::ServiceTable;
+use crate::observations::{HttpTap, ObservationStore};
 use crate::protocol_detect::Canonical;
 
 use super::{OverlayHttpsPolicy, Pumpable, StackCommand};
@@ -60,6 +61,63 @@ pub(super) struct StackEngine<D: Device> {
     /// and forwarded as plaintext to the service's real backend.
     tls_config: Option<Arc<ServerConfig>>,
     https_policy: OverlayHttpsPolicy,
+    /// When present, every proxied overlay connection is recorded here:
+    /// TCP-level who-talks-to-whom edges at accept time and, for plaintext
+    /// HTTP, per-request exercised routes (task-91). `None` in tests.
+    observations: Option<Arc<ObservationStore>>,
+}
+
+/// Everything needed to record one accepted overlay connection (task-91).
+/// Assembled on the stack loop from cheap in-memory lookups; the possibly-slow
+/// PID attribution runs on the blocking pool afterwards.
+struct ConnObserve {
+    store: Arc<ObservationStore>,
+    /// Tunnel domain the client addressed (`<name>.portzero.local`).
+    to_domain: String,
+    /// `"http"` / `"https"` / `"tcp"` from the virtual port.
+    protocol: &'static str,
+    /// The client's ephemeral source port, used to find the calling PID.
+    client_src_port: Option<u16>,
+    /// PID → tunnel domain for every discovered process-backed service, so an
+    /// attributed connection becomes a `web → db`-style edge.
+    pid_services: Vec<(u32, String)>,
+}
+
+impl ConnObserve {
+    /// Spawn the TCP-level edge recording for this connection and return the
+    /// plaintext HTTP tap (for http/https connections) that records exercised
+    /// routes from the byte stream.
+    ///
+    /// Edge policy: an edge is always recorded when the calling process maps to
+    /// another tunnel (source port → PID → discovered service). Unattributed
+    /// callers (curl, browsers) are recorded as `(external)` only for opaque
+    /// TCP services — for HTTP the cloud path's semantics are kept, where
+    /// external browser traffic shows up as exercised routes, not edges.
+    fn record_edge_and_make_tap(self) -> Option<HttpTap> {
+        let tap = matches!(self.protocol, "http" | "https")
+            .then(|| HttpTap::new(self.store.clone(), self.to_domain.clone()));
+
+        // PID attribution reads /proc (or shells out on other platforms), so
+        // it must not run on the stack loop.
+        tokio::task::spawn_blocking(move || {
+            let from = self
+                .client_src_port
+                .and_then(crate::management::pid_lookup::pid_for_source_port)
+                .and_then(|pid| {
+                    self.pid_services
+                        .iter()
+                        .find(|(p, _)| *p == pid)
+                        .map(|(_, domain)| domain.clone())
+                })
+                .filter(|from| *from != self.to_domain);
+            if from.is_some() || self.protocol == "tcp" {
+                self.store
+                    .record_connection(&self.to_domain, self.protocol, from.as_deref());
+            }
+        });
+
+        tap
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +137,7 @@ where
         cmd_rx: mpsc::Receiver<StackCommand>,
         tls_config: Option<Arc<ServerConfig>>,
         https_policy: OverlayHttpsPolicy,
+        observations: Option<Arc<ObservationStore>>,
     ) {
         // The interface uses our virtual gateway IP and covers the entire
         // 10.254.0.0/16 block via a route so that AnyIP accepts every VIP.
@@ -107,6 +166,7 @@ where
             cmd_rx,
             tls_config,
             https_policy,
+            observations,
         };
         engine.apply_services(initial);
 
@@ -306,7 +366,8 @@ where
             };
 
             tracing::debug!("accepted virtual connection on port {port} -> {action:?}");
-            if !self.start_connection_backend(handle, action) {
+            let observe = vip.and_then(|vip| self.connection_observe(handle, vip, port));
+            if !self.start_connection_backend(handle, action, observe) {
                 self.sockets.get_mut::<tcp::Socket>(handle).abort();
                 self.replace_listener(idx, port);
                 continue;
@@ -318,12 +379,24 @@ where
         }
     }
 
-    fn start_connection_backend(&mut self, handle: SocketHandle, action: ConnectionAction) -> bool {
+    fn start_connection_backend(
+        &mut self,
+        handle: SocketHandle,
+        action: ConnectionAction,
+        observe: Option<ConnObserve>,
+    ) -> bool {
         let (to_backend_tx, to_backend_rx) = mpsc::channel::<Vec<u8>>(16);
         let (from_backend_tx, from_backend_rx) = mpsc::channel::<Vec<u8>>(16);
+        // Record the who-talks-to-whom edge (and build the plaintext HTTP tap)
+        // for proxied actions only — the 80→443 redirect never reaches a
+        // backend and would double-count with the request re-sent over HTTPS.
+        let http_tap = match (&action, observe) {
+            (ConnectionAction::RedirectToHttps, _) | (_, None) => None,
+            (_, Some(observe)) => observe.record_edge_and_make_tap(),
+        };
         match action {
             ConnectionAction::PlainProxy(real_addr) => {
-                spawn_backend(real_addr, to_backend_rx, from_backend_tx);
+                spawn_backend(real_addr, to_backend_rx, from_backend_tx, http_tap);
             }
             ConnectionAction::TlsTerminate(real_addr) => {
                 let Some(ref tls) = self.tls_config else {
@@ -334,6 +407,7 @@ where
                     real_addr,
                     to_backend_rx,
                     from_backend_tx,
+                    http_tap,
                 );
             }
             ConnectionAction::RedirectToHttps => {
@@ -373,8 +447,10 @@ where
                     pending.vip,
                     pending.port
                 );
+                let (pending_vip, pending_port) = (pending.vip, pending.port);
                 self.pending_connections.remove(&handle);
-                if !self.start_connection_backend(handle, action) {
+                let observe = self.connection_observe(handle, pending_vip, pending_port);
+                if !self.start_connection_backend(handle, action, observe) {
                     self.sockets.get_mut::<tcp::Socket>(handle).abort();
                 }
                 continue;
@@ -390,6 +466,50 @@ where
                 self.sockets.get_mut::<tcp::Socket>(handle).abort();
             }
         }
+    }
+
+    /// Build the observation context for a just-accepted connection (task-91):
+    /// which tunnel domain it targets, the protocol label for the edge, the
+    /// client's source port (for PID attribution off-loop), and a snapshot of
+    /// PID→domain for every discovered service. `None` when observation is
+    /// disabled or the VIP has no (non-management) service.
+    fn connection_observe(
+        &self,
+        handle: SocketHandle,
+        vip: Ipv4Address,
+        port: u16,
+    ) -> Option<ConnObserve> {
+        let store = self.observations.as_ref()?.clone();
+        let name = self.services.assigned_name_by_vip(vip)?;
+        // The daemon's own dashboard/API tunnels are polled constantly by the
+        // desktop app; recording them would drown real services in noise.
+        if is_management_service(name) {
+            return None;
+        }
+        let to_domain = format!("{name}.portzero.local");
+        let protocol = match port {
+            80 => "http",
+            443 => "https",
+            _ => "tcp",
+        };
+        let client_src_port = self
+            .sockets
+            .get::<tcp::Socket>(handle)
+            .remote_endpoint()
+            .map(|ep| ep.port);
+        let pid_services = self
+            .services
+            .all()
+            .filter(|s| s.pid != 0 && !is_management_service(&s.name))
+            .map(|s| (s.pid, format!("{}.portzero.local", s.name)))
+            .collect();
+        Some(ConnObserve {
+            store,
+            to_domain,
+            protocol,
+            client_src_port,
+            pid_services,
+        })
     }
 
     /// Replace the listener at `idx` (whose socket was consumed by an accepted
@@ -639,6 +759,7 @@ fn spawn_backend(
     real_addr: std::net::SocketAddr,
     mut to_backend_rx: mpsc::Receiver<Vec<u8>>,
     from_backend_tx: mpsc::Sender<Vec<u8>>,
+    mut http_tap: Option<HttpTap>,
 ) {
     tokio::spawn(async move {
         let stream = match tokio::net::TcpStream::connect(real_addr).await {
@@ -677,6 +798,9 @@ fn spawn_backend(
         let writer = tokio::spawn(async move {
             use tokio::io::AsyncWriteExt;
             while let Some(chunk) = to_backend_rx.recv().await {
+                if let Some(tap) = http_tap.as_mut() {
+                    tap.inspect(&chunk);
+                }
                 if wr.write_all(&chunk).await.is_err() {
                     break;
                 }

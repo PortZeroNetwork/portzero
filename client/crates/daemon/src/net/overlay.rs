@@ -112,6 +112,10 @@ pub struct OverlayConfig {
     /// Production startup keeps this enabled; e2e tests that exercise only plain
     /// TCP can disable it to avoid unrelated OS trust-store side effects.
     pub install_trust: bool,
+    /// When present, the stack records observed edges + exercised routes for
+    /// proxied overlay connections here (task-91). The daemon passes the same
+    /// store the cloud connector uses; tests/benches leave it `None`.
+    pub observations: Option<Arc<crate::observations::ObservationStore>>,
 }
 
 impl Default for OverlayConfig {
@@ -122,6 +126,7 @@ impl Default for OverlayConfig {
             https_policy: OverlayHttpsPolicy::default(),
             dns_first_hit_policy: DnsFirstHitPolicy::default(),
             install_trust: true,
+            observations: None,
         }
     }
 }
@@ -234,7 +239,14 @@ impl OverlayNetwork {
         // Start the TCP stack
         let initial = ServiceTable::new();
         progress(OverlayStartStep::SpawningVirtualStack);
-        let stack = VirtualStack::spawn(tun, initial, tls_config, config.https_policy).await?;
+        let stack = VirtualStack::spawn(
+            tun,
+            initial,
+            tls_config,
+            config.https_policy,
+            config.observations.clone(),
+        )
+        .await?;
 
         // Start DNS server. It pings `dns_rescan` on a miss and waits on
         // `dns_updated` for the table to refresh so the first query for a

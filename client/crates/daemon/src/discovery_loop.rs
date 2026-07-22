@@ -309,6 +309,9 @@ pub async fn run_discovery_loop(config: &DaemonConfig) -> Result<()> {
         let overlay_config = OverlayConfig {
             https_policy: config.overlay_https,
             dns_first_hit_policy: config.dns_first_hit_policy,
+            // Same store the cloud connector records into, so local overlay
+            // traffic shows up in observed_edges/exercised_routes too (task-91).
+            observations: Some(observations.clone()),
             ..OverlayConfig::default()
         };
         let dns_rescan = dns_rescan.clone();

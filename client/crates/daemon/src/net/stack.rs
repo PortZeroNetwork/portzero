@@ -131,6 +131,7 @@ impl VirtualStack {
         initial: ServiceTable,
         tls_config: Option<Arc<ServerConfig>>,
         https_policy: OverlayHttpsPolicy,
+        observations: Option<Arc<crate::observations::ObservationStore>>,
     ) -> Result<Self> {
         let (cmd_tx, cmd_rx) = mpsc::channel::<StackCommand>(16);
 
@@ -175,7 +176,14 @@ impl VirtualStack {
         });
 
         let device = ChannelDevice::new(inbound_rx, outbound_tx);
-        StackEngine::spawn(device, initial, cmd_rx, tls_config, https_policy);
+        StackEngine::spawn(
+            device,
+            initial,
+            cmd_rx,
+            tls_config,
+            https_policy,
+            observations,
+        );
 
         Ok(Self {
             cmd_tx,
@@ -198,7 +206,8 @@ impl VirtualStack {
         D: Device + Pumpable + Send + 'static,
     {
         let (cmd_tx, cmd_rx) = mpsc::channel::<StackCommand>(16);
-        StackEngine::spawn(device, initial, cmd_rx, tls_config, https_policy);
+        // The mock-device test path records no observations.
+        StackEngine::spawn(device, initial, cmd_rx, tls_config, https_policy, None);
         // The mock-device test path drives no real TUN, so there are no
         // reader/writer tasks to track or abort.
         Self {
