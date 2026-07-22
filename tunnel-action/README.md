@@ -87,6 +87,8 @@ for a runnable version of this against one of the checked-in example apps.
 | `healthy`  | `true`    | Pass `--healthy` to `portzero wait` (polls `PZ_HEALTH_PATH` when declared). |
 | `timeout`  | `60`      | Seconds to wait per tunnel (`portzero wait --timeout`). |
 | `version`  | `latest`  | portzero release to install, without a leading `v` (e.g. `0.4.0`), or `latest`. |
+| `oidc-team` | *(empty)* | portzero.cloud team slug. When set, exchanges the job's GitHub OIDC token for a short-lived cloud-tunnel credential — see [Cloud tunnels via GitHub OIDC](#cloud-tunnels-via-github-oidc). |
+| `api-url`  | `https://app.portzero.cloud/api` | portzero.cloud API base for the OIDC exchange. Only change for non-production cloud deployments. |
 
 ## Outputs
 
@@ -94,6 +96,89 @@ for a runnable version of this against one of the checked-in example apps.
 |--------|-------------|
 | `urls` | Newline-separated resolved URL per entry in `tunnels`, same order (from `portzero url`). |
 | `url`  | Convenience: set only when `tunnels` had exactly one entry. |
+
+## Cloud tunnels via GitHub OIDC
+
+`*.tunnel.portzero.cloud` tunnels need a portzero.cloud credential. Instead of
+putting a long-lived token in a repository secret, set `oidc-team` and the
+action exchanges the job's **GitHub OIDC token** (audience `portzero.cloud`)
+for a **short-lived, team-scoped** tunnel credential (1 hour TTL), minted
+fresh per job and never written to the log:
+
+```yaml
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required — lets the job request a GitHub OIDC token
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Start the app under test
+        run: |
+          export PZ_TUNNEL="ci-${{ github.run_id }}--myapp.myteam.tunnel.portzero.cloud:443"
+          docker compose up -d --build
+
+      - id: tunnel
+        uses: PortZeroNetwork/portzero/tunnel-action@staging
+        with:
+          oidc-team: myteam
+          tunnels: ci-${{ github.run_id }}--myapp.myteam.tunnel.portzero.cloud
+```
+
+Two pieces of one-time setup:
+
+1. **Workflow**: `permissions: id-token: write` on the job (or workflow).
+   Without it GitHub does not give the runner an OIDC endpoint and the action
+   fails with an error telling you exactly that.
+2. **portzero.cloud**: the team named in `oidc-team` must have an **OIDC trust
+   rule** allowing this repository. Add one in the team's settings on
+   portzero.cloud; a `403`/`404` from the exchange with no trust rule is the
+   most common first-run failure. Docs: <https://portzero.net/docs>.
+
+The minted credential is masked in logs (`::add-mask::`), written to
+`~/.portzero/auth.json` (mode `600`) before the daemon starts, and expires on
+its own — nothing to revoke after the job.
+
+## Container jobs
+
+`jobs.<id>.container: ...` runs your steps inside a Docker container. The
+daemon still needs a TUN device and the network capabilities, so grant them in
+the job definition and keep the container's default **root** user:
+
+```yaml
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    container:
+      image: debian:bookworm
+      options: >-
+        --device /dev/net/tun
+        --cap-add NET_ADMIN
+        --cap-add NET_BIND_SERVICE
+    steps:
+      - uses: actions/checkout@v5
+      # ... same usage as above ...
+```
+
+What the action does differently in a container:
+
+- Verifies `/dev/net/tun` exists and the step runs as root — if not, it fails
+  with the exact `container.options` line to add (do **not** pass `--user`;
+  the default root user is required).
+- Installs missing `curl`/`python3`/`ca-certificates` via `apt-get` when the
+  image lacks them (non-Debian images must bake these in).
+- Installs the daemon via the repo's headless-container installer
+  (`scripts/cloud-agent-env-install.sh`): binary to `/usr/local/bin`,
+  file capabilities via `setcap`, a tiny split-DNS forwarder so
+  `*.portzero.local` resolves inside the container, and a direct (no-systemd)
+  daemon start. The `version` input is honored here too.
+- `mode: teardown` additionally stops that DNS forwarder and restores
+  `/etc/resolv.conf` from its backup, so re-runs on a reused container stay
+  deterministic.
+
+Outputs and the wait/health behavior are identical to the VM path.
 
 ## Teardown: why it's a second, explicit step
 
@@ -105,31 +190,25 @@ destroyed after the job anyway, so teardown here is about a clean log trail on
 failure (and not leaking a daemon across jobs if you run this on a
 self-hosted, reused runner).
 
-## Limitations (v1)
+## Limitations
 
-- **Linux hosted runners only** (e.g. `ubuntu-latest`). Local tunnels need a
-  real TUN device and `CAP_NET_ADMIN`/`CAP_NET_BIND_SERVICE`
-  (or root) — exactly what a normal Linux VM runner provides via
-  passwordless `sudo`, and exactly what a container-based job cannot: see the
-  next bullet.
-- **Container-based jobs are not supported.** `jobs.<id>.container: ...` runs
-  your steps inside a Docker container on the runner, which does not have
-  permission to create a TUN device on the *host* kernel. Run this action
-  directly on the VM (the default, no `container:` key) rather than inside a
-  job container. This action detects the container case and prints a warning,
-  but cannot work around it.
-- **macOS/Windows runners are not covered by v1.** The daemon supports both
+- **Linux only** (e.g. `ubuntu-latest`), either directly on the runner VM or
+  in a container-based job. Local tunnels need a real TUN device and
+  `CAP_NET_ADMIN`/`CAP_NET_BIND_SERVICE` (or root) — the VM path gets these
+  via the runner's passwordless `sudo`; the container path needs them granted
+  explicitly (see [Container jobs](#container-jobs)).
+- **Container jobs need `--device /dev/net/tun`, the two `--cap-add`s, and
+  the default root user.** Without them the action fails fast with the exact
+  `container.options` line to add — it cannot create a TUN device it was
+  never granted.
+- **macOS/Windows runners are not covered.** The daemon supports both
   platforms for local development, but this action has only been built and
   documented against `ubuntu-latest`.
-- **Cloud tunnels are out of scope for this action (for now).** A
-  `*.tunnel.portzero.cloud` domain works the same way from a developer's
-  laptop, but wiring it into CI without a long-lived secret needs an OIDC
-  credential exchange. The cloud-side half of that (GitHub Actions OIDC token
-  exchange for short-lived scoped tunnel credentials) has since shipped on
-  `portzero-cloud`; this action's client-side integration with it has not.
-  This action does not implement it yet; once wired up, `tunnels:` entries
-  with a `.tunnel.portzero.cloud` suffix will be able to use it without any
-  change to this action's interface.
+- **Cloud tunnels require `oidc-team`** (and its one-time trust-rule setup on
+  portzero.cloud) — see
+  [Cloud tunnels via GitHub OIDC](#cloud-tunnels-via-github-oidc). There is
+  deliberately no input for a long-lived token: short-lived per-job OIDC
+  credentials are the only supported path.
 
 ## Status
 
