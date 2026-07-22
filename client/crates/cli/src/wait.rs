@@ -47,10 +47,24 @@ async fn wait_with_config(
     let timeout = Duration::from_secs(timeout.unwrap_or(DEFAULT_TIMEOUT_SECS));
     let deadline = Instant::now() + timeout;
 
-    let client = reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .no_proxy()
         .danger_accept_invalid_certs(false)
-        .timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(5));
+    // Trust the daemon's local CA for https://*.portzero.local health probes.
+    // reqwest is built with rustls-tls, whose webpki root set never consults
+    // the OS trust store — where `portzero setup` installs the CA — so without
+    // this the probe fails TLS with BadCertificate even on a fully set-up
+    // machine (task-84). Cloud tunnels are unaffected: this only appends a
+    // root, the webpki roots still validate public certs.
+    if let Ok(path) = portzero_daemon::tls::LocalCa::ca_cert_path() {
+        if let Ok(pem) = std::fs::read(&path) {
+            if let Ok(cert) = reqwest::Certificate::from_pem(&pem) {
+                builder = builder.add_root_certificate(cert);
+            }
+        }
+    }
+    let client = builder
         .build()
         .map_err(|e| anyhow::anyhow!("failed to build HTTP client: {e}"))?;
 
