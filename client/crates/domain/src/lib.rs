@@ -1,6 +1,6 @@
 //! Domain template engine for PZ_TUNNEL support.
 //!
-//! Resolves templates like `{service}-{project}-{branch}.{cloud-username}.tunnel.portzero.cloud`
+//! Resolves templates like `{service}-{project}-{branch}--{cloud-username}.tunnel.portzero.cloud`
 //! into stable DNS-safe domain names for tunnel routes.
 //!
 //! There are two distinct username placeholders, and they are never
@@ -438,6 +438,30 @@ pub fn validate_tunnel_domain(domain: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Extract the cloud-username / team-slug namespace from a cloud tunnel domain:
+/// the trailing `--` segment of the single label before the base suffix.
+///
+/// `myapp--alice.tunnel.portzero.cloud` → `Some("alice")`;
+/// `web--team--acme.tunnel.portzero.cloud` → `Some("acme")` (namespace is the
+/// LAST segment; earlier `--` are part of the name). Returns `None` for a
+/// non-apex domain, a dotted multi-label name, or a label with no `--` scope —
+/// all of which are already rejected by [`validate_tunnel_domain`]. Mirrors the
+/// edge's own namespace extraction so the client and server agree on which
+/// segment is the namespace.
+///
+/// The base domain is read from `PZ_TUNNEL_BASE_DOMAIN`, matching
+/// [`validate_tunnel_domain`].
+pub fn tunnel_namespace(domain: &str) -> Option<&str> {
+    let base =
+        std::env::var("PZ_TUNNEL_BASE_DOMAIN").unwrap_or_else(|_| DEFAULT_BASE_DOMAIN.to_string());
+    let suffix = format!(".{base}");
+    let label = domain.strip_suffix(&suffix)?;
+    if label.contains('.') {
+        return None;
+    }
+    label.rsplit_once("--").map(|(_, ns)| ns)
 }
 
 /// Validate a single DNS label (the part between dots).

@@ -129,6 +129,17 @@ pub enum ServerMessage {
         /// Whether the account can create cloud tunnels right now, considering
         /// both its own plan and any paid team it belongs to.
         can_use_cloud_tunnels: bool,
+        /// The account's cloud username. Empty when the edge could not resolve it
+        /// (older token / lookup failure). Lets the client pre-validate that a
+        /// tunnel's `--<namespace>` scope is the user's own before registering.
+        #[serde(default)]
+        username: String,
+        /// Slugs of every team the account belongs to. Together with `username`
+        /// these are the namespaces the account may use on the shared apex, so
+        /// the client can flag an unusable namespace locally instead of only as
+        /// an edge rejection. Empty when unknown; the edge stays authoritative.
+        #[serde(default)]
+        team_slugs: Vec<String>,
     },
     /// Acknowledgement of a route registration.
     RouteAck {
@@ -307,6 +318,8 @@ mod tests {
             account_id: "acct_1".into(),
             plan: "pro".into(),
             can_use_cloud_tunnels: true,
+            username: String::new(),
+            team_slugs: Vec::new(),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -316,11 +329,15 @@ mod tests {
                 account_id,
                 plan,
                 can_use_cloud_tunnels,
+                username,
+                team_slugs,
             } => {
                 assert_eq!(session_id, "sess_1");
                 assert_eq!(account_id, "acct_1");
                 assert_eq!(plan, "pro");
                 assert!(can_use_cloud_tunnels);
+                assert!(username.is_empty());
+                assert!(team_slugs.is_empty());
             }
             _ => panic!("wrong variant"),
         }

@@ -10,7 +10,7 @@
 //! Examples (full names required):
 //!   PZ_TUNNEL=my-api.alice.tunnel.portzero.cloud
 //!   PZ_TUNNEL=my-db-{branch}.portzero.local
-//!   PZ_TUNNEL=web-{branch}.{cloud-username}.tunnel.portzero.cloud
+//!   PZ_TUNNEL=web-{branch}--{cloud-username}.tunnel.portzero.cloud
 //!
 //! `{local-username}` (OS username, always available) and `{cloud-username}`
 //! (cloud account username, requires login) are distinct placeholders —
@@ -70,7 +70,7 @@ pub use system_listeners::{enumerate_system_listeners, SystemListener};
 ///
 /// The value (after substitution) must be a full domain name:
 /// - `*.portzero.local` → local overlay
-/// - `*.<username>.tunnel.portzero.cloud` (or configured base) → cloud tunnel
+/// - `<name>--<username>.tunnel.portzero.cloud` (or configured base) → cloud tunnel
 ///
 /// No implicit suffix is ever appended.
 const ENV_VAR_NAME: &str = "PZ_TUNNEL";

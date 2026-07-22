@@ -284,6 +284,8 @@ mod tests {
             account_id: "a".into(),
             plan: "free".into(),
             can_use_cloud_tunnels: true,
+            username: String::new(),
+            team_slugs: Vec::new(),
         };
 
         let sm = ConnectionStateMachine::new();
@@ -359,6 +361,8 @@ mod tests {
             account_id: "a".into(),
             plan: "f".into(),
             can_use_cloud_tunnels: true,
+            username: String::new(),
+            team_slugs: Vec::new(),
         };
         assert!(sm.validate_receive(&welcome).is_err());
     }
@@ -388,6 +392,8 @@ mod tests {
             account_id: "a".into(),
             plan: "free".into(),
             can_use_cloud_tunnels: true,
+            username: String::new(),
+            team_slugs: Vec::new(),
         }
     }
 

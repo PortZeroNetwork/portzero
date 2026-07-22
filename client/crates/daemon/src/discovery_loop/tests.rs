@@ -438,3 +438,96 @@ fn test_write_https_policy_roundtrips_via_file() {
     assert!(loaded.overlay_https.redirect_port_80);
     assert!(!loaded.overlay_https.passthrough_port_443);
 }
+
+#[test]
+fn reject_unauthorized_cloud_routes_flags_only_disallowed_apex() {
+    use crate::discovery::{DiscoveredService, ServiceSource};
+
+    fn svc(domain: &str, pid: u32) -> DiscoveredService {
+        DiscoveredService {
+            domain: domain.into(),
+            domain_template: domain.into(),
+            substitutions: Default::default(),
+            port: 8080,
+            extra_ports: vec![],
+            health_path: None,
+            pid,
+            source: ServiceSource::Process { cwd: None },
+        }
+    }
+
+    let mut discovered = vec![
+        svc("web--alice.tunnel.portzero.cloud", 1), // username → kept
+        svc("api--acme.tunnel.portzero.cloud", 2),  // team slug → kept
+        svc("db.portzero.local", 3),                // local overlay → untouched
+        svc("web--bob.tunnel.portzero.cloud", 4),   // not owned → dropped + flagged
+    ];
+    let allowed = vec!["alice".to_string(), "acme".to_string()];
+
+    let issues = reject_unauthorized_cloud_routes(&mut discovered, &allowed);
+
+    let kept: Vec<&str> = discovered.iter().map(|s| s.domain.as_str()).collect();
+    assert_eq!(
+        kept,
+        vec![
+            "web--alice.tunnel.portzero.cloud",
+            "api--acme.tunnel.portzero.cloud",
+            "db.portzero.local",
+        ]
+    );
+    assert_eq!(issues.len(), 1);
+    match &issues[0] {
+        notify::Issue::CloudTunnelNotAllowed { domain, reason, pid } => {
+            assert_eq!(domain, "web--bob.tunnel.portzero.cloud");
+            assert!(reason.contains("'bob'"), "reason names the bad namespace: {reason}");
+            assert!(reason.contains("alice"), "reason lists allowed namespaces: {reason}");
+            assert_eq!(*pid, Some(4));
+        }
+        other => panic!("unexpected issue: {other:?}"),
+    }
+}
+
+#[test]
+fn cloud_rejection_issues_only_for_present_routes() {
+    use crate::discovery::ServiceSource;
+    use crate::route_table::Route;
+
+    let mut table = RouteTable::new();
+    table.routes.insert(
+        "web--alice.tunnel.portzero.cloud".into(),
+        Route {
+            domain: "web--alice.tunnel.portzero.cloud".into(),
+            domain_template: "web--alice.tunnel.portzero.cloud".into(),
+            substitutions: Default::default(),
+            host: "127.0.0.1".into(),
+            port: 8080,
+            extra_ports: vec![],
+            health_path: None,
+            source: ServiceSource::Process { cwd: None },
+            pid: 7,
+            discovered_at: chrono::Utc::now(),
+        },
+    );
+
+    let mut rejected = std::collections::HashMap::new();
+    rejected.insert(
+        "web--alice.tunnel.portzero.cloud".to_string(),
+        "name violates team naming policy".to_string(),
+    );
+    // A rejection for a tunnel that is no longer present must not be surfaced.
+    rejected.insert(
+        "gone--alice.tunnel.portzero.cloud".to_string(),
+        "stale".to_string(),
+    );
+
+    let issues = cloud_rejection_issues(&rejected, &table);
+    assert_eq!(issues.len(), 1);
+    match &issues[0] {
+        notify::Issue::CloudTunnelNotAllowed { domain, reason, pid } => {
+            assert_eq!(domain, "web--alice.tunnel.portzero.cloud");
+            assert_eq!(reason, "name violates team naming policy");
+            assert_eq!(*pid, Some(7));
+        }
+        other => panic!("unexpected issue: {other:?}"),
+    }
+}

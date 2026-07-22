@@ -678,6 +678,66 @@ async fn run_periodic_diagnostics(
     }
 }
 
+/// Drop cloud routes whose `--<namespace>` scope the account may not use,
+/// returning one [`notify::Issue`] per dropped route. `allowed` is the set of
+/// namespaces (username + team slugs) the edge reported in `Welcome`. Local
+/// overlay routes, and any cloud name without a parseable namespace (already
+/// caught structurally during the scan), are left untouched. Pure and
+/// unit-testable.
+fn reject_unauthorized_cloud_routes(
+    discovered: &mut Vec<crate::discovery::DiscoveredService>,
+    allowed: &[String],
+) -> Vec<notify::Issue> {
+    let mut issues = Vec::new();
+    discovered.retain(|svc| {
+        if crate::discovery::is_local_overlay_domain(&svc.domain) {
+            return true;
+        }
+        let Some(ns) = portzero_domain::tunnel_namespace(&svc.domain) else {
+            return true;
+        };
+        if allowed.iter().any(|a| a == ns) {
+            return true;
+        }
+        let example = allowed.first().map(String::as_str).unwrap_or("<username>");
+        issues.push(notify::Issue::CloudTunnelNotAllowed {
+            domain: svc.domain.clone(),
+            reason: format!(
+                "namespace '{ns}' is not one you can use. Cloud tunnels must be scoped to \
+                 your own username or a team you belong to — you can use: {}. Rename the \
+                 tunnel's trailing '--' segment to one of those (e.g. '<name>--{example}'), \
+                 or, if you recently joined a team, restart Port Zero to refresh the list.",
+                allowed.join(", "),
+            ),
+            pid: Some(svc.pid),
+        });
+        false
+    });
+    issues
+}
+
+/// Turn the connector's recorded edge rejections into issues, but only for
+/// domains still present in the route table (a removed tunnel drops its stale
+/// rejection). Pure and unit-testable.
+fn cloud_rejection_issues(
+    rejected: &std::collections::HashMap<String, String>,
+    route_table: &RouteTable,
+) -> Vec<notify::Issue> {
+    rejected
+        .iter()
+        .filter_map(|(domain, reason)| {
+            route_table
+                .routes
+                .get(domain)
+                .map(|route| notify::Issue::CloudTunnelNotAllowed {
+                    domain: domain.clone(),
+                    reason: reason.clone(),
+                    pid: Some(route.pid),
+                })
+        })
+        .collect()
+}
+
 /// Discover services, reconcile them against the route table (honouring the
 /// process-exit grace period), and propagate any changes to disk, the domain
 /// router, and the cloud connector.
@@ -757,6 +817,16 @@ async fn reconcile_routes(
         }
     }
 
+    // Early namespace-ownership check. If the edge reported which namespaces this
+    // account may use (its username + team slugs), drop and flag any cloud tunnel
+    // scoped to a namespace that is neither — before attempting to register it.
+    // The edge still enforces this authoritatively; this just turns a silent,
+    // doomed registration into an immediate local diagnostic. Skipped entirely
+    // while the set is unknown (`None`), so nothing is falsely blocked at startup.
+    if let Some(allowed) = cloud.as_ref().and_then(|c| c.allowed_namespaces()) {
+        cloud_scope_issues.extend(reject_unauthorized_cloud_routes(&mut discovered, &allowed));
+    }
+
     let count = discovered.len();
     let changes = route_table.update(discovered);
 
@@ -770,6 +840,15 @@ async fn reconcile_routes(
         if let Some(connector) = cloud {
             sync_cloud_routes(connector, &changes).await;
         }
+    }
+
+    // Residual server-side refusals: a route that passed the local check but the
+    // edge rejected (namespace not owned per the edge, a team requiring its own
+    // subdomain, a team naming policy, a plan limit). Surfaced only while the
+    // tunnel is still present so a removed tunnel drops its stale rejection.
+    if let Some(connector) = cloud {
+        cloud_scope_issues
+            .extend(cloud_rejection_issues(&connector.rejected_routes(), route_table));
     }
 
     (count, cloud_scope_issues)

@@ -170,7 +170,7 @@ pub(super) async fn gather_and_publish_issues(
     all.extend(docker_conflicts);
     // Cloud-side issues found while scanning routes this pass: invalidly-scoped
     // PZ_TUNNEL cloud tunnel domains (e.g. myservice.portzero.cloud instead of
-    // myservice.<cloud-username>.tunnel.portzero.cloud) and duplicate cloud
+    // myservice--<cloud-username>.tunnel.portzero.cloud) and duplicate cloud
     // tunnel URLs claimed by more than one context.
     all.extend(cloud_scope_issues);
     publish_issues(all, config, notified_issues);

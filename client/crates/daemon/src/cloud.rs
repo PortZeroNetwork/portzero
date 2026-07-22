@@ -61,6 +61,16 @@ pub struct CloudConnector {
     /// Records observed edges + exercised routes from forwarded traffic (task-63).
     /// Set by the discovery loop; `None` disables observation recording.
     observations: Arc<Mutex<Option<Arc<crate::observations::ObservationStore>>>>,
+    /// The namespaces this account may use on the shared apex (its cloud username
+    /// plus any team slugs), as reported by the edge in `Welcome`. `None` until a
+    /// `Welcome` with a non-empty username arrives — while unknown, the client
+    /// does no local ownership check and defers to the edge's authoritative one.
+    allowed_namespaces: Arc<Mutex<Option<Vec<String>>>>,
+    /// Cloud domains the edge rejected at registration (`RouteAck { success:
+    /// false }`), mapped to the edge's reason. Surfaced as a diagnostic so a
+    /// rejected tunnel is not silently shown as healthy. Cleared per domain once
+    /// it registers successfully.
+    rejected_routes: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl CloudConnector {
@@ -84,6 +94,8 @@ impl CloudConnector {
             route_statuses: Arc::new(Mutex::new(HashMap::new())),
             status_path: Arc::new(Mutex::new(None)),
             observations: Arc::new(Mutex::new(None)),
+            allowed_namespaces: Arc::new(Mutex::new(None)),
+            rejected_routes: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -105,6 +117,8 @@ impl CloudConnector {
             route_statuses: Arc::new(Mutex::new(HashMap::new())),
             status_path: Arc::new(Mutex::new(None)),
             observations: Arc::new(Mutex::new(None)),
+            allowed_namespaces: Arc::new(Mutex::new(None)),
+            rejected_routes: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -127,6 +141,22 @@ impl CloudConnector {
     /// Snapshot of review status per cloud domain.
     pub fn route_statuses(&self) -> HashMap<String, String> {
         self.route_statuses
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    /// The namespaces this account may use on the shared apex (username + team
+    /// slugs), if the edge has reported them yet. `None` means "unknown" — the
+    /// caller should skip its local ownership check and let the edge decide.
+    pub fn allowed_namespaces(&self) -> Option<Vec<String>> {
+        self.allowed_namespaces.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// Snapshot of cloud domains the edge rejected at registration, mapped to
+    /// the edge's reason.
+    pub fn rejected_routes(&self) -> HashMap<String, String> {
+        self.rejected_routes
             .lock()
             .map(|g| g.clone())
             .unwrap_or_default()
@@ -202,6 +232,8 @@ impl CloudConnector {
         let status_msg_for_reader = Arc::clone(&self.status_message);
         let route_statuses_for_reader = Arc::clone(&self.route_statuses);
         let status_path_for_reader = Arc::clone(&self.status_path);
+        let allowed_ns_for_reader = Arc::clone(&self.allowed_namespaces);
+        let rejected_routes_for_reader = Arc::clone(&self.rejected_routes);
         let observations_for_reader = self.observations.lock().ok().and_then(|g| g.clone());
         let forward_slots = Arc::new(Semaphore::new(MAX_CONCURRENT_FORWARDS));
         tokio::spawn(async move {
@@ -270,6 +302,8 @@ impl CloudConnector {
                     ServerMessage::Welcome {
                         plan,
                         can_use_cloud_tunnels,
+                        username,
+                        team_slugs,
                         ..
                     } => {
                         if let Ok(mut g) = plan_for_reader.lock() {
@@ -277,6 +311,21 @@ impl CloudConnector {
                         }
                         if let Ok(mut g) = can_use_cloud_tunnels_for_reader.lock() {
                             *g = Some(*can_use_cloud_tunnels);
+                        }
+                        // The namespaces this account may use = its username plus
+                        // any team slugs. Empty username means the edge could not
+                        // resolve it (older token / lookup failure); leave the set
+                        // `None` so the client skips its local ownership check and
+                        // defers to the edge.
+                        if let Ok(mut g) = allowed_ns_for_reader.lock() {
+                            *g = if username.is_empty() {
+                                None
+                            } else {
+                                let mut set = Vec::with_capacity(team_slugs.len() + 1);
+                                set.push(username.clone());
+                                set.extend(team_slugs.iter().cloned());
+                                Some(set)
+                            };
                         }
                         tracing::info!("Edge session established (plan: {})", plan);
                     }
@@ -318,20 +367,31 @@ impl CloudConnector {
                         domain,
                         ..
                     } => {
+                        // Record the rejection so the refused tunnel surfaces as a
+                        // diagnostic (problems list + `portzero status`) instead of
+                        // being shown as a healthy, published tunnel.
+                        if let Ok(mut g) = rejected_routes_for_reader.lock() {
+                            g.insert(domain.clone(), err.clone());
+                        }
+                        // Surface the reason for the client UI / `portzero status`.
+                        // Plan-related rejections get an upsell-flavored message;
+                        // any other reason (namespace, naming policy, …) shows the
+                        // edge's own text rather than being swallowed.
                         let low = err.to_lowercase();
-                        if low.contains("plan")
+                        let friendly = if low.contains("plan")
                             || low.contains("limit")
                             || low.contains("upgrade")
                             || low.contains("paid")
                             || low.contains("subscription")
                         {
-                            let friendly = format!(
-                                "Cloud route {} rejected: {}. Upgrade at https://app.portzero.cloud for portzero.cloud tunnels.",
-                                domain, err
-                            );
-                            if let Ok(mut g) = status_msg_for_reader.lock() {
-                                *g = Some(friendly);
-                            }
+                            format!(
+                                "Cloud route {domain} rejected: {err}. Upgrade at https://app.portzero.cloud for portzero.cloud tunnels."
+                            )
+                        } else {
+                            format!("Cloud route {domain} rejected: {err}")
+                        };
+                        if let Ok(mut g) = status_msg_for_reader.lock() {
+                            *g = Some(friendly);
                         }
                         // General warn happens in handle_incoming
                     }
@@ -343,6 +403,10 @@ impl CloudConnector {
                         status: Some(status),
                         ..
                     } => {
+                        // A route that now registers clears any prior rejection.
+                        if let Ok(mut g) = rejected_routes_for_reader.lock() {
+                            g.remove(domain);
+                        }
                         update_route_status(
                             &route_statuses_for_reader,
                             &status_path_for_reader,
@@ -752,6 +816,8 @@ mod tests {
             account_id: "acct_1".to_string(),
             plan: "free".to_string(),
             can_use_cloud_tunnels: false,
+            username: String::new(),
+            team_slugs: Vec::new(),
         };
         let result = handle_incoming(msg, &router, None).await.unwrap();
         assert!(result.is_none());

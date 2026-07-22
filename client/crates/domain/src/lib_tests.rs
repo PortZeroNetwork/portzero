@@ -346,6 +346,32 @@ fn test_validate_tunnel_domain_valid() {
 }
 
 #[test]
+fn test_tunnel_namespace_extracts_trailing_segment() {
+    // The namespace is the LAST `--` segment of the single label.
+    assert_eq!(
+        tunnel_namespace("myapp--alice.tunnel.portzero.cloud"),
+        Some("alice")
+    );
+    assert_eq!(
+        tunnel_namespace("ci-42--web--acme.tunnel.portzero.cloud"),
+        Some("acme")
+    );
+    assert_eq!(
+        tunnel_namespace("svc--team-name.tunnel.portzero.cloud"),
+        Some("team-name")
+    );
+}
+
+#[test]
+fn test_tunnel_namespace_none_for_unscoped_or_non_apex() {
+    // No `--` scope, dotted multi-label, and non-apex domains all yield None.
+    assert_eq!(tunnel_namespace("myapp.tunnel.portzero.cloud"), None);
+    assert_eq!(tunnel_namespace("api.alice.tunnel.portzero.cloud"), None);
+    assert_eq!(tunnel_namespace("myapp--alice.example.com"), None);
+    assert_eq!(tunnel_namespace("tunnel.portzero.cloud"), None);
+}
+
+#[test]
 fn test_validate_tunnel_domain_reserved_bare() {
     let err = validate_tunnel_domain("tunnel.portzero.cloud").unwrap_err();
     assert!(

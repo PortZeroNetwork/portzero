@@ -142,6 +142,8 @@ async fn mock_edge_server(
             account_id: "acct_mock".into(),
             plan: "pro".into(),
             can_use_cloud_tunnels: true,
+            username: String::new(),
+            team_slugs: Vec::new(),
         },
     )
     .await;

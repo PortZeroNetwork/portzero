@@ -77,6 +77,8 @@ mod tests {
             account_id: "acct_1".into(),
             plan: "free".into(),
             can_use_cloud_tunnels: true,
+            username: String::new(),
+            team_slugs: Vec::new(),
         };
         let text = encode_server(&msg).unwrap();
         let decoded = decode_server(&text).unwrap();
@@ -182,6 +184,8 @@ mod tests {
             account_id: "acct_1".into(),
             plan: "free".into(),
             can_use_cloud_tunnels: true,
+            username: String::new(),
+            team_slugs: Vec::new(),
         };
         let full = encode_server(&msg).unwrap();
 
