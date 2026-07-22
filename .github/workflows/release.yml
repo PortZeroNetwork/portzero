@@ -215,7 +215,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          # Scope by runner image, not just target triple: the amd64 Linux leg
+          # builds on ubuntu-22.04 (task-82, for glibc 2.35 compat) while the
+          # cross legs use ubuntu-latest. Keying on target alone let the 22.04
+          # job restore the 24.04 job's dependency cache; cargo then treated
+          # ksni as fresh but its rlib was unusable → "can't find crate for
+          # ksni". Failed runs never re-save, so it stuck. os+target keeps each
+          # image's cache separate.
+          key: ${{ matrix.os }}-${{ matrix.target }}
 
       - name: Install cross
         if: matrix.cross
