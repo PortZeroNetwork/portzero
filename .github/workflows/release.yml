@@ -978,6 +978,12 @@ jobs:
     name: Create Release
     needs:
       [version, build, package-windows, test-macos-interop, test-windows-interop]
+    # package-windows and test-windows-interop already tolerate the tag-only
+    # sign-windows-* jobs being skipped (via this same guard). Without the same
+    # guard here, the default success()-only condition propagates that upstream
+    # skip and skips Create Release too — so no unstable run ever published a
+    # prerelease. Publish as long as nothing actually failed or was cancelled.
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
