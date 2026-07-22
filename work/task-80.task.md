@@ -1,7 +1,7 @@
 ---
 id: 0aad4464-cec0-4267-afe7-1d1707b819cd
 slug: task-80
-status: todo
+status: done
 title: 'tunnel-action: OIDC cloud-tunnel auth + container-job support'
 created_at: 2026-07-22T10:24:55.908469661Z
 updated_at: 2026-07-22T10:24:55.908469661Z
