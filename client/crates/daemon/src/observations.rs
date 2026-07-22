@@ -360,7 +360,9 @@ impl HttpTap {
         if self.buf.is_empty() && !starts_with_http_method(chunk) {
             return;
         }
-        let take = chunk.len().min(MAX_HTTP_HEAD - self.buf.len().min(MAX_HTTP_HEAD));
+        let take = chunk
+            .len()
+            .min(MAX_HTTP_HEAD - self.buf.len().min(MAX_HTTP_HEAD));
         self.buf.extend_from_slice(&chunk[..take]);
 
         if let Some(head_end) = find_head_end(&self.buf) {
@@ -419,9 +421,7 @@ const HTTP_METHODS: [&str; 8] = [
 ];
 
 fn starts_with_http_method(chunk: &[u8]) -> bool {
-    HTTP_METHODS
-        .iter()
-        .any(|m| chunk.starts_with(m.as_bytes()))
+    HTTP_METHODS.iter().any(|m| chunk.starts_with(m.as_bytes()))
 }
 
 fn find_head_end(buf: &[u8]) -> Option<usize> {
@@ -566,12 +566,9 @@ mod tests {
 
         let snap = store.snapshot();
         assert_eq!(snap.routes.len(), 2);
-        assert!(snap
-            .routes
-            .iter()
-            .any(|r| r.method == "POST"
-                && r.path == "/api/guestbook"
-                && r.tests == vec!["guestbook flow".to_string()]));
+        assert!(snap.routes.iter().any(|r| r.method == "POST"
+            && r.path == "/api/guestbook"
+            && r.tests == vec!["guestbook flow".to_string()]));
         assert!(snap
             .routes
             .iter()

@@ -100,9 +100,17 @@ impl ConnObserve {
         // PID attribution reads /proc (or shells out on other platforms), so
         // it must not run on the stack loop.
         tokio::task::spawn_blocking(move || {
-            let from = self
+            let pid = self
                 .client_src_port
-                .and_then(crate::management::pid_lookup::pid_for_source_port)
+                .and_then(crate::management::pid_lookup::pid_for_source_port);
+            tracing::debug!(
+                to = %self.to_domain,
+                src_port = ?self.client_src_port,
+                ?pid,
+                pid_services = ?self.pid_services,
+                "overlay connection attribution"
+            );
+            let from = pid
                 .and_then(|pid| {
                     self.pid_services
                         .iter()

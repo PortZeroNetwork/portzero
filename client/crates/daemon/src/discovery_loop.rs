@@ -850,8 +850,10 @@ async fn reconcile_routes(
     // subdomain, a team naming policy, a plan limit). Surfaced only while the
     // tunnel is still present so a removed tunnel drops its stale rejection.
     if let Some(connector) = cloud {
-        cloud_scope_issues
-            .extend(cloud_rejection_issues(&connector.rejected_routes(), route_table));
+        cloud_scope_issues.extend(cloud_rejection_issues(
+            &connector.rejected_routes(),
+            route_table,
+        ));
     }
 
     (count, cloud_scope_issues)
