@@ -1,7 +1,7 @@
 ---
 id: e682fa8a-98f1-40c5-a952-edbb8f069e21
 slug: task-82
-status: todo
+status: done
 title: 'portzero login --github-repo: autonomous cloud auth by proving push access'
 created_at: 2026-07-22T10:26:13.141709523Z
 updated_at: 2026-07-22T10:26:13.141709523Z
