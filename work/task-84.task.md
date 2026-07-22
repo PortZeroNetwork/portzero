@@ -1,7 +1,7 @@
 ---
 id: 4ad32aca-81d2-4401-9bac-27d4a0b2c659
 slug: task-84
-status: todo
+status: done
 title: 'agents setup: repo-level provisioning for cloud AI dev environments'
 created_at: 2026-07-22T10:38:15.453155551Z
 updated_at: 2026-07-22T10:38:15.453155551Z
