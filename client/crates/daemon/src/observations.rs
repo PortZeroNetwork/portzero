@@ -14,10 +14,19 @@
 //! observed. Container-to-container traffic over compose-internal DNS (e.g.
 //! `http://db:5432` between services on the same compose network) never reaches
 //! the daemon and is therefore invisible here.
+//!
+//! Two paths feed the store:
+//!
+//! - the **cloud connector** records every HTTP request the edge forwards
+//!   ([`ObservationStore::record_http`]), and
+//! - the **local overlay stack** records connections it proxies to
+//!   `*.portzero.local` VIPs — TCP-level edges via
+//!   [`ObservationStore::record_connection`] (task-91) and, for plaintext HTTP,
+//!   per-request routes via [`HttpTap`].
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -31,7 +40,8 @@ pub struct ObservedEdge {
     pub from: Option<String>,
     /// The tunnel domain that was addressed.
     pub to: String,
-    /// Application protocol (currently always `"http"`).
+    /// Application protocol (`"http"`, `"https"`, or `"tcp"` for opaque
+    /// overlay connections like Postgres).
     pub protocol: String,
     /// Number of requests observed for this edge.
     pub request_count: u64,
@@ -123,6 +133,16 @@ pub struct ObservationStore {
     path: PathBuf,
 }
 
+impl std::fmt::Debug for ObservationStore {
+    // Manual: the store sits inside `Debug`-deriving config structs
+    // (`OverlayConfig`), and its guts are a mutex nobody wants dumped.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ObservationStore")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Do not write `observations.json` more than this often, so a burst of
 /// requests does not thrash the disk.
 const FLUSH_INTERVAL: Duration = Duration::from_secs(2);
@@ -206,19 +226,38 @@ impl ObservationStore {
             .filter(|h| looks_like_tunnel(h))
             .filter(|h| *h != to_domain);
         if from.is_some() {
-            let key = (from.clone(), to_domain.clone());
-            let entry = guard.edges.entry(key).or_insert_with(|| ObservedEdge {
-                from: from.clone(),
-                to: to_domain.clone(),
-                protocol: "http".to_string(),
-                request_count: 0,
-                last_seen: now,
-            });
-            entry.request_count += 1;
-            entry.last_seen = now;
+            record_edge(&mut guard, from, &to_domain, "http", now);
         }
 
-        // Throttled persistence.
+        self.maybe_flush(guard);
+    }
+
+    /// Record one proxied overlay connection into tunnel `to_domain` (task-91).
+    ///
+    /// This is the TCP-level counterpart of [`Self::record_http`], fed by the
+    /// local overlay stack at accept time: `from` is the calling tunnel when
+    /// the client process could be attributed to one (source port → PID →
+    /// discovered service), `None` for external callers (curl, a browser).
+    /// `protocol` is `"http"`/`"https"` for web ports and `"tcp"` otherwise.
+    pub fn record_connection(&self, to_domain: &str, protocol: &str, from: Option<&str>) {
+        let to_domain = to_domain.trim().to_ascii_lowercase();
+        if to_domain.is_empty() {
+            return;
+        }
+        let from = from
+            .map(|f| f.trim().to_ascii_lowercase())
+            .filter(|f| !f.is_empty() && *f != to_domain);
+        let Ok(mut guard) = self.inner.lock() else {
+            return;
+        };
+        record_edge(&mut guard, from, &to_domain, protocol, Utc::now());
+        self.maybe_flush(guard);
+    }
+
+    /// Persist to disk if the last write is older than [`FLUSH_INTERVAL`].
+    /// Consumes the lock guard so the write happens outside the critical
+    /// section.
+    fn maybe_flush(&self, mut guard: std::sync::MutexGuard<'_, Inner>) {
         let should_flush = guard
             .last_flush
             .map(|t| t.elapsed() >= FLUSH_INTERVAL)
@@ -248,6 +287,28 @@ impl ObservationStore {
     }
 }
 
+/// Insert or bump the `(from, to)` edge under the lock. The edge key ignores
+/// protocol, so a TCP-level record and a later HTTP-level record for the same
+/// pair collapse into one edge (the protocol of the first sighting wins).
+fn record_edge(
+    guard: &mut Inner,
+    from: Option<String>,
+    to_domain: &str,
+    protocol: &str,
+    now: DateTime<Utc>,
+) {
+    let key = (from.clone(), to_domain.to_string());
+    let entry = guard.edges.entry(key).or_insert_with(|| ObservedEdge {
+        from,
+        to: to_domain.to_string(),
+        protocol: protocol.to_string(),
+        request_count: 0,
+        last_seen: now,
+    });
+    entry.request_count += 1;
+    entry.last_seen = now;
+}
+
 fn snapshot(inner: &Inner) -> Observations {
     Observations {
         edges: inner.edges.values().cloned().collect(),
@@ -261,6 +322,110 @@ fn persist(path: &Path, obs: &Observations) {
             tracing::debug!("failed to persist observations: {e}");
         }
     }
+}
+
+/// Longest request head we will buffer while waiting for `\r\n\r\n`.
+const MAX_HTTP_HEAD: usize = 16 * 1024;
+
+/// Best-effort per-connection HTTP sniffer for the local overlay proxy
+/// (task-91).
+///
+/// The overlay stack shuttles opaque byte chunks between the client and the
+/// real backend; feed each client→backend chunk to [`HttpTap::inspect`] and
+/// every request head that starts at a chunk boundary (the overwhelmingly
+/// common case — clients write the head in one syscall) is parsed and recorded
+/// as an exercised route (plus a `Referer`/`Origin` edge) on `to_domain`.
+/// Non-HTTP traffic never matches a method token and costs one prefix check
+/// per chunk. Purely best-effort telemetry: request bodies that happen to
+/// start a chunk with a method token could over-count, and heads split below
+/// a method token's boundary are missed.
+pub struct HttpTap {
+    store: Arc<ObservationStore>,
+    to_domain: String,
+    /// Partial request head carried across chunks; empty when idle.
+    buf: Vec<u8>,
+}
+
+impl HttpTap {
+    pub fn new(store: Arc<ObservationStore>, to_domain: String) -> Self {
+        Self {
+            store,
+            to_domain,
+            buf: Vec::new(),
+        }
+    }
+
+    /// Inspect one client→backend chunk, recording any complete request head.
+    pub fn inspect(&mut self, chunk: &[u8]) {
+        if self.buf.is_empty() && !starts_with_http_method(chunk) {
+            return;
+        }
+        let take = chunk
+            .len()
+            .min(MAX_HTTP_HEAD - self.buf.len().min(MAX_HTTP_HEAD));
+        self.buf.extend_from_slice(&chunk[..take]);
+
+        if let Some(head_end) = find_head_end(&self.buf) {
+            let head = self.buf[..head_end].to_vec();
+            self.buf.clear();
+            self.record_head(&head);
+        } else if self.buf.len() >= MAX_HTTP_HEAD {
+            // Give up on an over-long (or non-HTTP-after-all) head.
+            self.buf.clear();
+        }
+    }
+
+    fn record_head(&self, head: &[u8]) {
+        let head = String::from_utf8_lossy(head);
+        let mut lines = head.split("\r\n");
+        let Some(request_line) = lines.next() else {
+            return;
+        };
+        let mut parts = request_line.split_whitespace();
+        let (Some(method), Some(path), Some(version)) = (parts.next(), parts.next(), parts.next())
+        else {
+            return;
+        };
+        if !version.starts_with("HTTP/") || !path.starts_with('/') {
+            return;
+        }
+        let mut referer = None;
+        let mut origin = None;
+        let mut x_pz_test = None;
+        for line in lines {
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
+            let value = value.trim();
+            if name.eq_ignore_ascii_case("referer") {
+                referer = Some(value.to_string());
+            } else if name.eq_ignore_ascii_case("origin") {
+                origin = Some(value.to_string());
+            } else if name.eq_ignore_ascii_case("x-pz-test") {
+                x_pz_test = Some(value.to_string());
+            }
+        }
+        let referer = referer.or(origin);
+        self.store.record_http(
+            &self.to_domain,
+            method,
+            path,
+            referer.as_deref(),
+            x_pz_test.as_deref(),
+        );
+    }
+}
+
+const HTTP_METHODS: [&str; 8] = [
+    "GET ", "POST ", "PUT ", "DELETE ", "PATCH ", "HEAD ", "OPTIONS ", "TRACE ",
+];
+
+fn starts_with_http_method(chunk: &[u8]) -> bool {
+    HTTP_METHODS.iter().any(|m| chunk.starts_with(m.as_bytes()))
+}
+
+fn find_head_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
 #[cfg(test)]
@@ -327,6 +492,92 @@ mod tests {
         );
         assert_eq!(edge.to, "api.alice.tunnel.portzero.cloud");
         assert_eq!(edge.request_count, 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_record_connection_edges() {
+        let dir = std::env::temp_dir().join(format!("pz-obs-conn-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let store = ObservationStore::new(&dir);
+
+        // Attributed TCP connection: web → db.
+        store.record_connection(
+            "db.pzdemo.portzero.local",
+            "tcp",
+            Some("web.pzdemo.portzero.local"),
+        );
+        store.record_connection(
+            "db.pzdemo.portzero.local",
+            "tcp",
+            Some("web.pzdemo.portzero.local"),
+        );
+        // Unattributed (external) TCP connection.
+        store.record_connection("db.pzdemo.portzero.local", "tcp", None);
+        // Self-edge is dropped.
+        store.record_connection(
+            "db.pzdemo.portzero.local",
+            "tcp",
+            Some("db.pzdemo.portzero.local"),
+        );
+
+        let snap = store.snapshot();
+        assert_eq!(snap.edges.len(), 2);
+        let attributed = snap
+            .edges
+            .iter()
+            .find(|e| e.from.as_deref() == Some("web.pzdemo.portzero.local"))
+            .expect("web → db edge");
+        assert_eq!(attributed.to, "db.pzdemo.portzero.local");
+        assert_eq!(attributed.protocol, "tcp");
+        assert_eq!(attributed.request_count, 2);
+        let external = snap
+            .edges
+            .iter()
+            .find(|e| e.from.is_none())
+            .expect("(external) → db edge");
+        // The self-edge collapsed into nothing, not into the external edge +1.
+        assert_eq!(external.request_count, 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_http_tap_records_routes_and_referer_edges() {
+        let dir = std::env::temp_dir().join(format!("pz-obs-tap-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let store = Arc::new(ObservationStore::new(&dir));
+        let mut tap = HttpTap::new(store.clone(), "web.pzdemo.portzero.local".to_string());
+
+        // A full request head in one chunk, with a body after the blank line.
+        tap.inspect(
+            b"POST /api/guestbook HTTP/1.1\r\n\
+              Host: web.pzdemo.portzero.local\r\n\
+              X-PZ-Test: guestbook flow\r\n\
+              Content-Length: 2\r\n\r\n{}",
+        );
+        // A head split across two chunks (continuation does not start with a
+        // method token, so it must be joined onto the buffered head).
+        tap.inspect(b"GET /api/guestbook?limit=5 HTTP/1.1\r\n");
+        tap.inspect(b"Referer: http://other.pzdemo.portzero.local/page\r\n\r\n");
+        // Postgres-ish bytes: never mistaken for HTTP.
+        tap.inspect(&[0x00, 0x00, 0x00, 0x08, 0x04, 0xd2, 0x16, 0x2f]);
+
+        let snap = store.snapshot();
+        assert_eq!(snap.routes.len(), 2);
+        assert!(snap.routes.iter().any(|r| r.method == "POST"
+            && r.path == "/api/guestbook"
+            && r.tests == vec!["guestbook flow".to_string()]));
+        assert!(snap
+            .routes
+            .iter()
+            .any(|r| r.method == "GET" && r.path == "/api/guestbook"));
+        assert_eq!(snap.edges.len(), 1);
+        assert_eq!(
+            snap.edges[0].from.as_deref(),
+            Some("other.pzdemo.portzero.local")
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

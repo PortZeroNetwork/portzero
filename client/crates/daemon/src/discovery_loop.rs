@@ -309,6 +309,9 @@ pub async fn run_discovery_loop(config: &DaemonConfig) -> Result<()> {
         let overlay_config = OverlayConfig {
             https_policy: config.overlay_https,
             dns_first_hit_policy: config.dns_first_hit_policy,
+            // Same store the cloud connector records into, so local overlay
+            // traffic shows up in observed_edges/exercised_routes too (task-91).
+            observations: Some(observations.clone()),
             ..OverlayConfig::default()
         };
         let dns_rescan = dns_rescan.clone();
@@ -847,8 +850,10 @@ async fn reconcile_routes(
     // subdomain, a team naming policy, a plan limit). Surfaced only while the
     // tunnel is still present so a removed tunnel drops its stale rejection.
     if let Some(connector) = cloud {
-        cloud_scope_issues
-            .extend(cloud_rejection_issues(&connector.rejected_routes(), route_table));
+        cloud_scope_issues.extend(cloud_rejection_issues(
+            &connector.rejected_routes(),
+            route_table,
+        ));
     }
 
     (count, cloud_scope_issues)

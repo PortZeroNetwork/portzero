@@ -84,9 +84,18 @@ pub(crate) fn spawn_tls_backend(
     real_addr: SocketAddr,
     to_backend_rx: mpsc::Receiver<Vec<u8>>,
     from_backend_tx: mpsc::Sender<Vec<u8>>,
+    http_tap: Option<crate::observations::HttpTap>,
 ) {
     tokio::spawn(async move {
-        if let Err(e) = tls_proxy(server_config, real_addr, to_backend_rx, from_backend_tx).await {
+        if let Err(e) = tls_proxy(
+            server_config,
+            real_addr,
+            to_backend_rx,
+            from_backend_tx,
+            http_tap,
+        )
+        .await
+        {
             tracing::warn!("TLS proxy for {real_addr}: {e:#}");
         }
     });
@@ -97,6 +106,7 @@ async fn tls_proxy(
     real_addr: SocketAddr,
     to_backend_rx: mpsc::Receiver<Vec<u8>>,
     from_backend_tx: mpsc::Sender<Vec<u8>>,
+    mut http_tap: Option<crate::observations::HttpTap>,
 ) -> Result<()> {
     // `tls_io` is handed to TlsAcceptor; `raw_io` is the bridge to our channels.
     let (tls_io, raw_io) = tokio::io::duplex(DUPLEX_BUF);
@@ -143,7 +153,24 @@ async fn tls_proxy(
     let (mut be_rd, mut be_wr) = backend.into_split();
 
     let client_to_backend = tokio::spawn(async move {
-        let _ = tokio::io::copy(&mut tls_rd, &mut be_wr).await;
+        // Manual copy loop (rather than `tokio::io::copy`) so the decrypted
+        // client→backend plaintext can be sniffed for exercised HTTP routes
+        // (task-91).
+        let mut buf = vec![0u8; READ_BUF];
+        loop {
+            match tls_rd.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if let Some(tap) = http_tap.as_mut() {
+                        tap.inspect(&buf[..n]);
+                    }
+                    if be_wr.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = be_wr.shutdown().await;
     });
     let backend_to_client = tokio::spawn(async move {
         let _ = tokio::io::copy(&mut be_rd, &mut tls_wr).await;

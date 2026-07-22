@@ -477,10 +477,20 @@ fn reject_unauthorized_cloud_routes_flags_only_disallowed_apex() {
     );
     assert_eq!(issues.len(), 1);
     match &issues[0] {
-        notify::Issue::CloudTunnelNotAllowed { domain, reason, pid } => {
+        notify::Issue::CloudTunnelNotAllowed {
+            domain,
+            reason,
+            pid,
+        } => {
             assert_eq!(domain, "web--bob.tunnel.portzero.cloud");
-            assert!(reason.contains("'bob'"), "reason names the bad namespace: {reason}");
-            assert!(reason.contains("alice"), "reason lists allowed namespaces: {reason}");
+            assert!(
+                reason.contains("'bob'"),
+                "reason names the bad namespace: {reason}"
+            );
+            assert!(
+                reason.contains("alice"),
+                "reason lists allowed namespaces: {reason}"
+            );
             assert_eq!(*pid, Some(4));
         }
         other => panic!("unexpected issue: {other:?}"),
@@ -523,7 +533,11 @@ fn cloud_rejection_issues_only_for_present_routes() {
     let issues = cloud_rejection_issues(&rejected, &table);
     assert_eq!(issues.len(), 1);
     match &issues[0] {
-        notify::Issue::CloudTunnelNotAllowed { domain, reason, pid } => {
+        notify::Issue::CloudTunnelNotAllowed {
+            domain,
+            reason,
+            pid,
+        } => {
             assert_eq!(domain, "web--alice.tunnel.portzero.cloud");
             assert_eq!(reason, "name violates team naming policy");
             assert_eq!(*pid, Some(7));
