@@ -44,7 +44,7 @@ use tokio::net::TcpStream;
 use tokio::time::timeout;
 
 /// A detected protocol mapped to its canonical TCP port.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Canonical {
     /// Plain HTTP → port 80.
     Http,

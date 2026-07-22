@@ -264,6 +264,7 @@ mod tests {
             domain_template: domain.to_string(),
             substitutions: Default::default(),
             service_port,
+            backend_protocol: None,
             real_addr: "127.0.0.1:0".to_string(),
             health_path: None,
             pid: 1,

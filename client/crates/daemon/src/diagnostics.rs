@@ -232,6 +232,7 @@ mod tests {
             domain_template: String::new(),
             substitutions: Default::default(),
             service_port: 8080,
+            backend_protocol: None,
             real_addr: "127.0.0.1:32771".to_string(),
             health_path: None,
             pid: 1234,

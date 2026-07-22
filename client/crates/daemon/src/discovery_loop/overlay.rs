@@ -26,6 +26,7 @@ pub(super) fn write_overlay_state(
             domain_template: s.domain_template.clone(),
             substitutions: s.substitutions.clone(),
             service_port: s.service_port,
+            backend_protocol: s.backend_protocol,
             real_addr: s.real_addr.to_string(),
             health_path: s.health_path.clone(),
             pid: s.pid,

@@ -54,11 +54,24 @@ struct OpenedTunnel {
 }
 
 /// The scheme+URL a browser should open for a `.portzero.local` service, or
-/// `None` when the service is not an HTTP/HTTPS web port.
+/// `None` when the service is not an HTTP/HTTPS web port — or when it is one of
+/// the daemon's own reserved overlay names.
+///
+/// The reserved-name guard matters because every other discovery path
+/// (`discovery::process`, `discovery::docker`, and the management register
+/// handler) already refuses these names, but the auto-open decision keys off
+/// the port alone. Without this check a service that surfaced as `api` (or
+/// `portzero`) on port 80/443 would auto-open `http(s)://api.portzero.local`,
+/// which DNS routes to the daemon's own management server — popping the legacy
+/// dashboard as if it were a customer tunnel.
 fn web_url(name: &str, service_port: u16) -> Option<String> {
+    let domain = format!("{name}.portzero.local");
+    if crate::discovery::is_reserved_overlay_domain(&domain) {
+        return None;
+    }
     match service_port {
-        80 => Some(format!("http://{name}.portzero.local")),
-        443 => Some(format!("https://{name}.portzero.local")),
+        80 => Some(format!("http://{domain}")),
+        443 => Some(format!("https://{domain}")),
         _ => None,
     }
 }
@@ -203,26 +216,36 @@ mod tests {
     #[test]
     fn web_url_only_matches_web_ports() {
         assert_eq!(
-            web_url("api", 80).as_deref(),
-            Some("http://api.portzero.local")
+            web_url("web", 80).as_deref(),
+            Some("http://web.portzero.local")
         );
         assert_eq!(
-            web_url("api", 443).as_deref(),
-            Some("https://api.portzero.local")
+            web_url("web", 443).as_deref(),
+            Some("https://web.portzero.local")
         );
         assert_eq!(web_url("db", 5432), None);
     }
 
     #[test]
+    fn web_url_never_opens_a_reserved_management_name() {
+        // `api`/`portzero`/`portzero-api` resolve to the daemon's own management
+        // server, so they must never auto-open even on a web port.
+        assert_eq!(web_url("api", 80), None);
+        assert_eq!(web_url("api", 443), None);
+        assert_eq!(web_url("portzero", 80), None);
+        assert_eq!(web_url("portzero-api", 443), None);
+    }
+
+    #[test]
     fn a_present_tunnel_is_only_recorded_once() {
         let mut tracker = AutoOpenTracker::new();
-        let services = [svc("api", 80, 100)];
+        let services = [svc("web", 80, 100)];
         tracker.reconcile(false, &services);
         tracker.reconcile(false, &services);
         assert_eq!(
             tracker
                 .opened
-                .get("http://api.portzero.local")
+                .get("http://web.portzero.local")
                 .map(|e| e.identity.as_str()),
             Some("pid:100")
         );
@@ -231,14 +254,14 @@ mod tests {
     #[test]
     fn a_transient_missing_scan_does_not_reopen_the_same_process() {
         let mut tracker = AutoOpenTracker::new();
-        let services = [svc("api", 80, 100)];
+        let services = [svc("web", 80, 100)];
         tracker.reconcile(false, &services);
 
         // Several empty scans — e.g. overlay-refresh timeouts — must not forget
         // the tunnel within the grace window...
         for _ in 0..(MISSES_BEFORE_FORGET - 1) {
             tracker.reconcile(false, &[]);
-            assert!(tracker.opened.contains_key("http://api.portzero.local"));
+            assert!(tracker.opened.contains_key("http://web.portzero.local"));
         }
         // ...and when the *same* PID returns, the counter resets and it is still
         // considered already-opened (no reopen).
@@ -246,7 +269,7 @@ mod tests {
         assert_eq!(
             tracker
                 .opened
-                .get("http://api.portzero.local")
+                .get("http://web.portzero.local")
                 .map(|e| e.misses),
             Some(0)
         );
@@ -255,15 +278,15 @@ mod tests {
     #[test]
     fn same_domain_new_pid_is_treated_as_a_restart() {
         let mut tracker = AutoOpenTracker::new();
-        tracker.reconcile(false, &[svc("api", 80, 100)]);
+        tracker.reconcile(false, &[svc("web", 80, 100)]);
 
         // A different PID on the same domain is a genuine restart: the entry now
         // tracks the new PID (and would have reopened the browser).
-        tracker.reconcile(false, &[svc("api", 80, 200)]);
+        tracker.reconcile(false, &[svc("web", 80, 200)]);
         assert_eq!(
             tracker
                 .opened
-                .get("http://api.portzero.local")
+                .get("http://web.portzero.local")
                 .map(|e| e.identity.as_str()),
             Some("pid:200")
         );
@@ -272,11 +295,11 @@ mod tests {
     #[test]
     fn a_domain_gone_past_the_grace_window_is_forgotten() {
         let mut tracker = AutoOpenTracker::new();
-        tracker.reconcile(false, &[svc("api", 80, 100)]);
+        tracker.reconcile(false, &[svc("web", 80, 100)]);
         for _ in 0..MISSES_BEFORE_FORGET {
             tracker.reconcile(false, &[]);
         }
-        assert!(!tracker.opened.contains_key("http://api.portzero.local"));
+        assert!(!tracker.opened.contains_key("http://web.portzero.local"));
     }
 
     #[test]
@@ -284,7 +307,7 @@ mod tests {
         // Docker-sourced services always report pid == 0, so two distinct
         // containers on the same domain must not look identical.
         let mut tracker = AutoOpenTracker::new();
-        let mut first = svc("api", 80, 0);
+        let mut first = svc("web", 80, 0);
         first.source = ServiceSource::Container {
             id: "abc123".to_owned(),
             name: "api-container".to_owned(),
@@ -293,7 +316,7 @@ mod tests {
         assert_eq!(
             tracker
                 .opened
-                .get("http://api.portzero.local")
+                .get("http://web.portzero.local")
                 .map(|e| e.identity.as_str()),
             Some("container:abc123")
         );
@@ -319,7 +342,7 @@ mod tests {
         let path = dir.join("auto_open.json");
 
         let mut tracker = AutoOpenTracker::new();
-        let services = [svc("api", 80, 100)];
+        let services = [svc("web", 80, 100)];
         tracker.reconcile(true, &services);
         tracker.save(&path).unwrap();
 
@@ -329,7 +352,7 @@ mod tests {
         let mut restarted = AutoOpenTracker::load(&path);
         let is_new = restarted
             .opened
-            .get("http://api.portzero.local")
+            .get("http://web.portzero.local")
             .map(|e| e.identity.as_str())
             != Some(service_identity(&services[0]).as_str());
         assert!(
@@ -340,7 +363,7 @@ mod tests {
         assert_eq!(
             restarted
                 .opened
-                .get("http://api.portzero.local")
+                .get("http://web.portzero.local")
                 .map(|e| e.identity.as_str()),
             Some("pid:100")
         );

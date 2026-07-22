@@ -191,24 +191,42 @@ fn display_substitutions(
 ///   name) are served over HTTPS at their public domain by the edge, which
 ///   terminates TLS regardless of the local backend port — so they are always
 ///   reachable, and clickable, at `https://{domain}`.
-/// - **Local overlay tunnels** are reached by name on the virtual IP: port 443
-///   is HTTPS and port 80 is HTTP. When the HTTPS-for-port-80 policy is on, a
-///   port-80 tunnel is also served over HTTPS on 443 (with plain HTTP redirected
-///   there), so its canonical link is `https://` even though it asked to be
-///   exposed on 80. Any other port is not a web port and yields `None`.
+/// - **Reserved overlay names** (`api.portzero.local`, `portzero.local`, …)
+///   point at the daemon's own management server, never a customer tunnel, and
+///   are never linked.
+/// - **Local overlay tunnels** are reached by name on the virtual IP. Ports 443
+///   and 80 use the bare `https://{domain}` / `http://{domain}` (443 is HTTPS;
+///   80 is HTTP, or HTTPS when the HTTPS-for-port-80 policy is on, since the
+///   daemon also serves it on 443 with HTTP redirected there). Any *other* port
+///   is reached at `{scheme}://{domain}:{port}` — the overlay plain-proxies that
+///   exact port — but only when the backend was detected as a web protocol; a
+///   raw TCP service (Postgres, Redis, …) has no browser URL and yields `None`.
 pub(super) fn tunnel_link_url(
     domain: &str,
     service_port: u16,
+    backend_protocol: Option<crate::protocol_detect::Canonical>,
     https_policy: &crate::net::stack::OverlayHttpsPolicy,
 ) -> Option<String> {
+    use crate::protocol_detect::Canonical;
+
     if !crate::discovery::is_local_overlay_domain(domain) {
         return Some(format!("https://{domain}"));
+    }
+    if crate::discovery::is_reserved_overlay_domain(domain) {
+        return None;
     }
     match service_port {
         443 => Some(format!("https://{domain}")),
         80 if https_policy.enable_for_port_80 => Some(format!("https://{domain}")),
         80 => Some(format!("http://{domain}")),
-        _ => None,
+        // A web app on any other port (a dev server on 3000/5173/8080, …) is
+        // reachable in the browser at that exact port. Link it using the
+        // detected scheme; leave a non-web backend unlinked.
+        port => match backend_protocol {
+            Some(Canonical::Tls) => Some(format!("https://{domain}:{port}")),
+            Some(Canonical::Http) => Some(format!("http://{domain}:{port}")),
+            None => None,
+        },
     }
 }
 
@@ -446,7 +464,7 @@ pub async fn status_json(State(state): State<AppState>) -> Json<serde_json::Valu
                 "real_addr": r.real_addr,
                 "service_port": r.service_port,
                 "health_path": r.health_path,
-                "link_url": tunnel_link_url(&r.domain, r.service_port, &https_policy),
+                "link_url": tunnel_link_url(&r.domain, r.service_port, r.backend_protocol, &https_policy),
                 "pid": r.pid,
             })
         })
@@ -475,7 +493,10 @@ pub async fn status_json(State(state): State<AppState>) -> Json<serde_json::Valu
                 "alerts": substitution_alerts(domain_template, &r.substitutions),
                 "port": r.port,
                 "health_path": r.health_path,
-                "link_url": tunnel_link_url(&r.domain, r.port, &https_policy),
+                // Cloud routes are public HTTPS domains at the edge (never
+                // `.portzero.local`), so `tunnel_link_url` resolves the scheme
+                // from the domain alone and ignores the protocol argument.
+                "link_url": tunnel_link_url(&r.domain, r.port, None, &https_policy),
                 "pid": r.pid,
                 "status": status,
             })

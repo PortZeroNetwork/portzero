@@ -119,6 +119,28 @@ pub fn is_local_overlay_domain(name: &str) -> bool {
     n.ends_with(".portzero.local") || n == "portzero.local" || n.ends_with(".local")
 }
 
+/// Overlay names the daemon reserves for itself. Both `portzero.local` and
+/// `api.portzero.local` resolve to the daemon's own management server (the
+/// legacy browser dashboard at `/` and the `/v1/*` REST API); the two
+/// `portzero*.portzero.local` forms are the same names a user might otherwise
+/// try to register. Nothing user-owned may claim these, and — crucially — the
+/// daemon must never treat one as a discovered customer tunnel to auto-open or
+/// to render as a clickable link.
+pub const RESERVED_OVERLAY_DOMAINS: &[&str] = &[
+    "portzero.local",
+    "api.portzero.local",
+    "portzero.portzero.local",
+    "portzero-api.portzero.local",
+];
+
+/// True when `domain` is one of the [`RESERVED_OVERLAY_DOMAINS`] (case-insensitive).
+pub fn is_reserved_overlay_domain(domain: &str) -> bool {
+    let d = domain.trim().to_ascii_lowercase();
+    RESERVED_OVERLAY_DOMAINS
+        .iter()
+        .any(|reserved| d == *reserved)
+}
+
 /// Extract the name for the overlay from a full name like "my-db.portzero.local".
 /// The input must already be a full domain (no implicit suffix added by us).
 pub fn extract_local_label(name: &str) -> String {

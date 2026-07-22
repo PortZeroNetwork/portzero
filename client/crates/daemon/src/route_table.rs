@@ -211,6 +211,11 @@ pub struct OverlayRoute {
     pub substitutions: BTreeMap<String, String>,
     /// Port clients are expected to connect to on the virtual IP (e.g. 8080).
     pub service_port: u16,
+    /// Best-effort protocol detected on the backend, when known. Drives whether
+    /// (and with which scheme) a non-80/443 web tunnel gets a clickable browser
+    /// link; `None` for a raw TCP service (Postgres, Redis, …) that has no URL.
+    #[serde(default)]
+    pub backend_protocol: Option<crate::protocol_detect::Canonical>,
     /// Actual host address the daemon proxies to (e.g. "127.0.0.1:32771").
     pub real_addr: String,
     /// Optional readiness path from PZ_HEALTH_PATH (e.g. "/health"). `None` when

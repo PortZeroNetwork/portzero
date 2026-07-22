@@ -16,12 +16,9 @@ use crate::management::server::{AppState, PortRegistration};
 use crate::route_table::OverlayState;
 
 const MAX_REGISTRATIONS_PER_PROCESS: usize = 64;
-const RESERVED_REGISTRATION_NAMES: &[&str] = &[
-    "portzero.local",
-    "api.portzero.local",
-    "portzero.portzero.local",
-    "portzero-api.portzero.local",
-];
+/// Names a user may not register, shared with the discovery/auto-open guards so
+/// there is a single source of truth for what the daemon reserves for itself.
+use crate::discovery::RESERVED_OVERLAY_DOMAINS as RESERVED_REGISTRATION_NAMES;
 
 mod dashboard;
 pub use dashboard::{
@@ -541,26 +538,69 @@ mod tests {
 
     #[test]
     fn tunnel_link_url_uses_scheme_for_local_web_port() {
+        use crate::protocol_detect::Canonical;
         let policy = OverlayHttpsPolicy::default();
         assert_eq!(
-            tunnel_link_url("web.portzero.local", 80, &policy).as_deref(),
+            tunnel_link_url("web.portzero.local", 80, Some(Canonical::Http), &policy).as_deref(),
             Some("http://web.portzero.local")
         );
         assert_eq!(
-            tunnel_link_url("staging.portzero.net.portzero.local", 443, &policy).as_deref(),
+            tunnel_link_url(
+                "staging.portzero.net.portzero.local",
+                443,
+                Some(Canonical::Tls),
+                &policy
+            )
+            .as_deref(),
             Some("https://staging.portzero.net.portzero.local")
         );
+    }
+
+    #[test]
+    fn tunnel_link_url_links_web_backend_on_nonstandard_port() {
+        // A dev server on a non-80/443 port is reachable at that exact port on
+        // the overlay; link it with the detected scheme.
+        use crate::protocol_detect::Canonical;
+        let policy = OverlayHttpsPolicy::default();
         assert_eq!(
-            tunnel_link_url("api.portzero.local", 443, &policy).as_deref(),
-            Some("https://api.portzero.local")
+            tunnel_link_url("web.portzero.local", 3000, Some(Canonical::Http), &policy).as_deref(),
+            Some("http://web.portzero.local:3000")
+        );
+        assert_eq!(
+            tunnel_link_url("app.portzero.local", 8443, Some(Canonical::Tls), &policy).as_deref(),
+            Some("https://app.portzero.local:8443")
         );
     }
 
     #[test]
     fn tunnel_link_url_skips_non_web_local_ports() {
+        // A raw TCP service (no detected web protocol) on a non-80/443 port has
+        // no browser URL.
         let policy = OverlayHttpsPolicy::default();
-        assert_eq!(tunnel_link_url("db.portzero.local", 5432, &policy), None);
-        assert_eq!(tunnel_link_url("admin.portzero.local", 8080, &policy), None);
+        assert_eq!(
+            tunnel_link_url("db.portzero.local", 5432, None, &policy),
+            None
+        );
+        assert_eq!(
+            tunnel_link_url("admin.portzero.local", 8080, None, &policy),
+            None
+        );
+    }
+
+    #[test]
+    fn tunnel_link_url_never_links_reserved_management_name() {
+        // `api.portzero.local` / `portzero.local` are the daemon's own
+        // management server, never a customer tunnel — never clickable.
+        use crate::protocol_detect::Canonical;
+        let policy = OverlayHttpsPolicy::default();
+        assert_eq!(
+            tunnel_link_url("api.portzero.local", 443, Some(Canonical::Tls), &policy),
+            None
+        );
+        assert_eq!(
+            tunnel_link_url("portzero.local", 80, Some(Canonical::Http), &policy),
+            None
+        );
     }
 
     #[test]
@@ -572,7 +612,7 @@ mod tests {
             ..OverlayHttpsPolicy::default()
         };
         assert_eq!(
-            tunnel_link_url("web.portzero.local", 80, &policy).as_deref(),
+            tunnel_link_url("web.portzero.local", 80, None, &policy).as_deref(),
             Some("https://web.portzero.local")
         );
     }
@@ -583,11 +623,11 @@ mod tests {
         // regardless of the local backend port the process listens on.
         let policy = OverlayHttpsPolicy::default();
         assert_eq!(
-            tunnel_link_url("api--alice.tunnel.portzero.cloud", 8080, &policy).as_deref(),
+            tunnel_link_url("api--alice.tunnel.portzero.cloud", 8080, None, &policy).as_deref(),
             Some("https://api--alice.tunnel.portzero.cloud")
         );
         assert_eq!(
-            tunnel_link_url("web--bob.tunnel.portzero.cloud", 3000, &policy).as_deref(),
+            tunnel_link_url("web--bob.tunnel.portzero.cloud", 3000, None, &policy).as_deref(),
             Some("https://web--bob.tunnel.portzero.cloud")
         );
     }
