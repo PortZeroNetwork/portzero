@@ -18,10 +18,12 @@
 //! marker-delimited block so re-running updates in place instead of
 //! duplicating content on every run.
 
+mod repo;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
 const BEGIN_MARKER: &str = "<!-- portzero:begin -->";
@@ -69,22 +71,52 @@ struct AgentReport {
     instructions: Step,
 }
 
-/// Run `portzero agents setup` for every supported agent and print a report.
+/// Run `portzero agents setup`: machine-level config for every detected
+/// agent, plus repo-level provisioning when the current directory is inside
+/// a git repository (see the `repo` module).
 ///
 /// `dry_run`: compute and print what would change without writing anything or
 /// invoking any agent's `mcp add` subcommand.
-pub fn setup(dry_run: bool) -> Result<()> {
-    let home = dirs::home_dir().context("could not determine home directory")?;
+/// `repo_only` / `machine_only`: restrict to one scope (default: both, with
+/// the repo scope auto-skipped when not inside a git repository).
+pub fn setup(dry_run: bool, repo_only: bool, machine_only: bool) -> Result<()> {
+    let repo_root = if machine_only {
+        None
+    } else {
+        let cwd = std::env::current_dir().context("could not determine current directory")?;
+        let root = repo::find_repo_root(&cwd);
+        if repo_only && root.is_none() {
+            bail!(
+                "--repo-only requires running inside a git repository, but {} is not in one.\n\
+                 cd into the repository you want to provision (or drop --repo-only to \
+                 configure machine-level agent config instead).",
+                cwd.display()
+            );
+        }
+        root
+    };
 
-    let reports = vec![
-        claude_code::setup(&home, dry_run),
-        codex::setup(&home, dry_run),
-        pi::setup(&home, dry_run),
-        opencode::setup(&home, dry_run),
-        grok::setup(&home, dry_run),
-    ];
+    let machine_reports = if repo_only {
+        Vec::new()
+    } else {
+        let home = dirs::home_dir().context("could not determine home directory")?;
+        vec![
+            claude_code::setup(&home, dry_run),
+            codex::setup(&home, dry_run),
+            pi::setup(&home, dry_run),
+            opencode::setup(&home, dry_run),
+            grok::setup(&home, dry_run),
+        ]
+    };
+    let repo_report = repo_root.map(|root| repo::setup(&root, dry_run));
 
-    print_report(&reports, dry_run);
+    print_report(&machine_reports, dry_run);
+    if let Some(report) = &repo_report {
+        if !machine_reports.is_empty() {
+            println!();
+        }
+        repo::print_report(report);
+    }
     Ok(())
 }
 
@@ -148,11 +180,11 @@ fn run_mcp_add(bin: &str, args: &[&str], dry_run: bool) -> Step {
     }
 }
 
-/// Insert or update a marker-delimited block in a Markdown instructions file.
-/// Returns whether the file changed.
-fn upsert_markdown_block(path: &Path, dry_run: bool) -> Step {
+/// Insert or update a marker-delimited block (containing `body`) in a
+/// Markdown instructions file. Returns whether the file changed.
+fn upsert_markdown_block(path: &Path, body: &str, dry_run: bool) -> Step {
     let existing = std::fs::read_to_string(path).unwrap_or_default();
-    let block = format!("{BEGIN_MARKER}\n{INSTRUCTIONS_BODY}\n{END_MARKER}");
+    let block = format!("{BEGIN_MARKER}\n{body}\n{END_MARKER}");
 
     let new_content = match (existing.find(BEGIN_MARKER), existing.find(END_MARKER)) {
         (Some(start), Some(end_marker_start)) if end_marker_start >= start => {
@@ -334,7 +366,8 @@ mod claude_code {
         } else {
             Step::Failed("`claude` CLI not found on PATH".to_string())
         };
-        let instructions = upsert_markdown_block(&instructions_path(home), dry_run);
+        let instructions =
+            upsert_markdown_block(&instructions_path(home), INSTRUCTIONS_BODY, dry_run);
         AgentReport {
             name: "Claude Code",
             mcp,
@@ -457,7 +490,8 @@ mod opencode {
             json!({"type": "local", "command": ["portzero", "mcp"], "enabled": true}),
             dry_run,
         );
-        let instructions = upsert_markdown_block(&instructions_path(home), dry_run);
+        let instructions =
+            upsert_markdown_block(&instructions_path(home), INSTRUCTIONS_BODY, dry_run);
         AgentReport {
             name: "opencode",
             mcp,
@@ -496,7 +530,8 @@ mod grok {
             };
         }
         let mcp = upsert_toml_mcp_entry(&config_path(home), dry_run);
-        let instructions = upsert_markdown_block(&instructions_path(home), dry_run);
+        let instructions =
+            upsert_markdown_block(&instructions_path(home), INSTRUCTIONS_BODY, dry_run);
         AgentReport {
             name: "Grok Build",
             mcp,
@@ -528,7 +563,7 @@ mod tests {
         let path = home.join("CLAUDE.md");
         std::fs::write(&path, "# My notes\n\nSome existing content.\n").unwrap();
 
-        let first = upsert_markdown_block(&path, false);
+        let first = upsert_markdown_block(&path, INSTRUCTIONS_BODY, false);
         assert!(matches!(first, Step::Updated(_)));
         let after_first = std::fs::read_to_string(&path).unwrap();
         assert!(after_first.contains("Some existing content."));
@@ -536,7 +571,7 @@ mod tests {
         assert!(after_first.contains("list_services"));
 
         // Re-running with unchanged content is a no-op.
-        let second = upsert_markdown_block(&path, false);
+        let second = upsert_markdown_block(&path, INSTRUCTIONS_BODY, false);
         assert!(matches!(second, Step::AlreadyConfigured(_)));
         let after_second = std::fs::read_to_string(&path).unwrap();
         assert_eq!(after_first, after_second);
@@ -549,7 +584,7 @@ mod tests {
         let home = tmp_home();
         let path = home.join("CLAUDE.md");
 
-        let step = upsert_markdown_block(&path, true);
+        let step = upsert_markdown_block(&path, INSTRUCTIONS_BODY, true);
         assert!(matches!(step, Step::Updated(_)));
         assert!(!path.exists());
 
