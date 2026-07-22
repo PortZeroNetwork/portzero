@@ -240,14 +240,24 @@ enum SkillCommand {
 enum AgentsCommand {
     /// Detect installed AI coding agents (Claude Code, Codex, pi.dev,
     /// opencode, Grok Build) and register the Port Zero MCP server + a
-    /// user-level instructions block for each one found. Safe to re-run:
-    /// existing config entries and instructions content outside the
-    /// portzero-managed block are preserved.
+    /// user-level instructions block for each one found. When run inside a
+    /// git repository, also provisions that repo for cloud AI dev
+    /// environments (.claude/settings.json install hook, AGENTS.md tunnel
+    /// instructions, .mcp.json MCP entry). Safe to re-run: existing config
+    /// entries and content outside the portzero-managed blocks are preserved.
     Setup {
         /// Print what would change without writing any files or invoking any
         /// agent's own `mcp add` command.
         #[arg(long)]
         dry_run: bool,
+        /// Only provision the current repository; skip machine-level agent
+        /// config. Requires running inside a git repository.
+        #[arg(long, conflicts_with = "machine_only")]
+        repo_only: bool,
+        /// Only configure machine-level agent config; skip repository
+        /// provisioning even when inside a git repository.
+        #[arg(long)]
+        machine_only: bool,
     },
 }
 
@@ -367,7 +377,11 @@ async fn main() -> anyhow::Result<()> {
             SkillCommand::Install { dir, force, print } => skill::install(dir, force, print)?,
         },
         Command::Agents(cmd) => match cmd {
-            AgentsCommand::Setup { dry_run } => agents::setup(dry_run)?,
+            AgentsCommand::Setup {
+                dry_run,
+                repo_only,
+                machine_only,
+            } => agents::setup(dry_run, repo_only, machine_only)?,
         },
         Command::Daemon(cmd) => match cmd {
             DaemonCommand::Start {
