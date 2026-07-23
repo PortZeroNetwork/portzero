@@ -290,6 +290,13 @@ enum AgentsCommand {
         #[arg(long)]
         machine_only: bool,
     },
+    /// Session-end cost hook (internal). Reads the Claude Code Stop-hook JSON
+    /// on stdin, computes this session's agent-labor cost from usage metadata
+    /// only, and records it when cost tracking is consented for the repo
+    /// (otherwise prints a one-line teaser and persists nothing). Wired into
+    /// `.claude/settings.json` by `agents setup`; not meant to be run by hand.
+    #[command(hide = true)]
+    CostHook,
 }
 
 #[derive(Subcommand)]
@@ -414,6 +421,7 @@ async fn main() -> anyhow::Result<()> {
                 repo_only,
                 machine_only,
             } => agents::setup(dry_run, repo_only, machine_only)?,
+            AgentsCommand::CostHook => agents::run_cost_hook()?,
         },
         Command::Daemon(cmd) => match cmd {
             DaemonCommand::Start {

@@ -92,8 +92,6 @@ impl CostStore {
     }
 
     /// Atomically persist the store, creating `~/.portzero/cost/` if needed.
-    // Write side: exercised by tests now, wired to the session-end cost hook in WS4.
-    #[allow(dead_code)]
     pub fn save(&self) -> Result<()> {
         let dir = store_dir()?;
         portzero_daemon::secure_file::ensure_private_dir(&dir)
@@ -120,7 +118,6 @@ impl CostStore {
     }
 
     /// Insert or replace a session, keyed by `session_id` (idempotent).
-    #[allow(dead_code)]
     pub fn upsert_session(&mut self, session: StoredSession) {
         if let Some(slot) = self
             .sessions
@@ -134,7 +131,6 @@ impl CostStore {
     }
 
     /// Insert or replace a commit cost, keyed by `(session_id, commit_sha)`.
-    #[allow(dead_code)]
     pub fn upsert_commit(&mut self, commit: StoredCommitCost) {
         if let Some(slot) = self
             .commits

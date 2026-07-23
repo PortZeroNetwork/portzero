@@ -18,6 +18,7 @@
 //! marker-delimited block so re-running updates in place instead of
 //! duplicating content on every run.
 
+mod cost_hook;
 mod repo;
 
 use std::path::{Path, PathBuf};
@@ -121,6 +122,12 @@ pub fn setup(dry_run: bool, repo_only: bool, machine_only: bool) -> Result<()> {
         repo::print_report(report);
     }
     Ok(())
+}
+
+/// Run `portzero agents cost-hook`: the session-end cost hook (see the
+/// `cost_hook` module). Invoked by the managed Stop hook, not by hand.
+pub fn run_cost_hook() -> Result<()> {
+    cost_hook::run()
 }
 
 fn print_report(reports: &[AgentReport], dry_run: bool) {
