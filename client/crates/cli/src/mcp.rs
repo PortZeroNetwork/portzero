@@ -191,6 +191,31 @@ fn tool_list() -> Value {
                         "type": "string",
                         "description": "One-line description of the fix.",
                     },
+                    "agent": {
+                        "type": "string",
+                        "description": "Optional: the coding agent that produced the fix \
+                            (e.g. claude-code). Recorded as cost metadata only.",
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Optional: the model used (e.g. claude-opus-4-8).",
+                    },
+                    "tokens_in": {
+                        "type": "integer",
+                        "description": "Optional: input tokens spent producing the fix.",
+                    },
+                    "tokens_out": {
+                        "type": "integer",
+                        "description": "Optional: output tokens spent producing the fix.",
+                    },
+                    "cost_usd": {
+                        "type": "number",
+                        "description": "Optional: measured USD cost attributed to the fix.",
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Optional: the agent session id this fix belongs to.",
+                    },
                 },
                 "required": ["thread_id", "fix_commit", "fix_summary"],
             },
@@ -200,6 +225,7 @@ fn tool_list() -> Value {
     // file within the client file-size budget).
     if let Value::Array(arr) = &mut tools {
         arr.extend(crate::mcp_feedback::report_tools());
+        arr.extend(crate::mcp_cost::cost_tools());
     }
     tools
 }
@@ -218,6 +244,10 @@ fn call_tool(name: &str, arguments: Option<&Value>) -> Result<Value, String> {
             return Ok(crate::mcp_feedback::submit_report("feature", arguments))
         }
         _ => {}
+    }
+
+    if let Some(result) = crate::mcp_cost::call_cost_tool(name, arguments) {
+        return Ok(result);
     }
 
     let config = DaemonConfig::load();
@@ -350,7 +380,8 @@ fn propose_fix(arguments: Option<&Value>) -> Value {
     }
 
     let path = format!("/feedback/comments/{thread_id}/propose-fix");
-    let body = json!({ "fix_commit": fix_commit, "fix_summary": fix_summary });
+    let mut body = json!({ "fix_commit": fix_commit, "fix_summary": fix_summary });
+    attach_optional_cost_args(&mut body, arguments);
     let result = run_async(async move {
         let resp = client.post(&path, &body).await?;
         let http_status = resp.status();
@@ -373,6 +404,30 @@ fn propose_fix(arguments: Option<&Value>) -> Value {
             "failed to propose fix for thread {thread_id} (HTTP {http_status}): {text}"
         )),
         Err(e) => tool_error(&format!("{e:#}")),
+    }
+}
+
+/// Copy the optional cost-metadata arguments (`agent`, `model`, `tokens_in`,
+/// `tokens_out`, `cost_usd`, `session_id`) onto a propose-fix POST body, only
+/// when the caller supplied them. Metadata only — never message content.
+fn attach_optional_cost_args(body: &mut Value, arguments: Option<&Value>) {
+    let Some(args) = arguments else { return };
+    let Some(map) = body.as_object_mut() else {
+        return;
+    };
+    for key in [
+        "agent",
+        "model",
+        "tokens_in",
+        "tokens_out",
+        "cost_usd",
+        "session_id",
+    ] {
+        if let Some(v) = args.get(key) {
+            if !v.is_null() {
+                map.insert(key.to_string(), v.clone());
+            }
+        }
     }
 }
 
@@ -684,6 +739,59 @@ mod tests {
     }
 
     #[test]
+    fn test_tools_list_advertises_cost_tools() {
+        let result = handle_method("tools/list", None).unwrap();
+        let names: Vec<&str> = result["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        for expected in ["cost_of_commit", "cost_of_pr", "cost_of_lines"] {
+            assert!(names.contains(&expected), "missing cost tool {expected}");
+        }
+    }
+
+    #[test]
+    fn test_propose_fix_schema_has_optional_cost_args_not_required() {
+        let tool = tool_named("propose_fix");
+        let props = &tool["inputSchema"]["properties"];
+        // The optional cost-metadata args are advertised as typed properties.
+        assert_eq!(props["agent"]["type"], "string");
+        assert_eq!(props["model"]["type"], "string");
+        assert_eq!(props["tokens_in"]["type"], "integer");
+        assert_eq!(props["tokens_out"]["type"], "integer");
+        assert_eq!(props["cost_usd"]["type"], "number");
+        assert_eq!(props["session_id"]["type"], "string");
+        // But `required` is still only the original three.
+        let required: Vec<&str> = tool["inputSchema"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(required, vec!["thread_id", "fix_commit", "fix_summary"]);
+    }
+
+    #[test]
+    fn test_attach_optional_cost_args_copies_only_present_values() {
+        let mut body = json!({ "fix_commit": "abc", "fix_summary": "s" });
+        let args = json!({
+            "agent": "claude-code",
+            "cost_usd": 0.42,
+            "tokens_in": 100,
+            "session_id": null,
+        });
+        attach_optional_cost_args(&mut body, Some(&args));
+        assert_eq!(body["agent"], "claude-code");
+        assert_eq!(body["cost_usd"], 0.42);
+        assert_eq!(body["tokens_in"], 100);
+        // Null values and absent keys are not copied.
+        assert!(body.get("session_id").is_none());
+        assert!(body.get("model").is_none());
+    }
+
+    #[test]
     fn test_propose_fix_missing_args_is_tool_error() {
         let params = json!({ "name": "propose_fix", "arguments": {} });
         let result = handle_method("tools/call", Some(&params)).unwrap();
@@ -738,15 +846,9 @@ mod tests {
         assert!(text.contains("invalid status"), "got: {text}");
     }
 
-    /// Serializes tests that mutate the process-global HOME env var.
-    fn home_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
     #[test]
     fn test_list_feedback_requires_login() {
-        let _guard = home_lock();
+        let _guard = crate::home_env_lock();
         // Point HOME at an empty temp dir so no ~/.portzero/auth.json exists;
         // the tool must fail with the not-logged-in message before any HTTP.
         let dir = std::env::temp_dir().join(format!(

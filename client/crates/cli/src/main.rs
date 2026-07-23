@@ -4,11 +4,24 @@
 
 use clap::{Parser, Subcommand};
 
+/// A single process-global lock serializing every test that mutates the
+/// `HOME` environment variable. Because `HOME` is shared across the whole
+/// binary, each module's HOME-dependent tests must take the *same* lock —
+/// separate per-module mutexes would not serialize against each other and
+/// would race (one test's `save` landing in a directory another test has
+/// already repointed `HOME` away from).
+#[cfg(test)]
+pub(crate) fn home_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 mod agents;
 mod api_client;
 mod auth;
 mod autostart;
 mod browser;
+mod cost_store;
 mod daemon;
 mod demo;
 mod demo_server;
@@ -18,6 +31,7 @@ mod frontdoor;
 mod github_repo_login;
 mod inspect;
 mod mcp;
+mod mcp_cost;
 mod mcp_feedback;
 mod review;
 mod selfupdate;
