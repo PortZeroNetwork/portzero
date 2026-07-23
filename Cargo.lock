@@ -3649,6 +3649,7 @@ dependencies = [
  "clap",
  "dirs",
  "hex",
+ "libc",
  "portzero-daemon",
  "portzero-domain",
  "portzero-proto",

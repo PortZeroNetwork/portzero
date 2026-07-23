@@ -20,6 +20,7 @@ mod inspect;
 mod mcp;
 mod mcp_feedback;
 mod review;
+mod selfupdate;
 mod setup;
 mod skill;
 mod trust;
@@ -115,6 +116,21 @@ enum Command {
     /// Run privileged first-run setup after package installation.
     #[command(alias = "post-install")]
     Setup,
+
+    /// Update portzero to the latest release, replacing this binary in place.
+    ///
+    /// Downloads the newest published build for this OS/arch and swaps it in,
+    /// then refreshes system integration. This is the command the update notice
+    /// points to.
+    Update {
+        /// Only report whether a newer version is available; change nothing.
+        #[arg(long)]
+        check: bool,
+        /// Reinstall the latest build even if it matches the installed version
+        /// (repairs a broken install).
+        #[arg(long)]
+        force: bool,
+    },
 
     /// Log in to portzero.cloud (opens browser by default).
     Login {
@@ -334,6 +350,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Inspect => inspect::inspect()?,
         Command::Mcp => mcp::serve()?,
         Command::Setup => setup::run().await?,
+        Command::Update { check, force } => selfupdate::run(check, force).await?,
 
         Command::Login {
             interactive,

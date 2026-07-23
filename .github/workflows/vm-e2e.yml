@@ -312,3 +312,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           COMBINED_SKIP_CLOUD: ${{ (github.event_name == 'workflow_dispatch' && !inputs.staging) && '1' || '' }}
         run: just vm-test ${{ matrix.platform }}
+
+      - name: autoupdate (real `portzero update` against a local release mirror)
+        # Separate hermetic reset per platform: install the built binary, then
+        # drive the actual `portzero update` self-updater against a throwaway
+        # local version.json + archive and assert it detects, downloads, unpacks,
+        # and swaps the binary in place. This is the path that, if it ever breaks
+        # in a shipped release, silently stops every installed user from updating —
+        # so it gets its own pass rather than riding on the combined install flow.
+        # No secrets and no gh needed: the mirror is built in-guest from the same
+        # binary vm-test already staged; the gated cross-version advance stays a
+        # clean SKIP until a prior release that understands `update` is published.
+        run: just vm-test-autoupdate ${{ matrix.platform }}

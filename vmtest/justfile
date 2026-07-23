@@ -79,6 +79,15 @@ vm-test-lifecycle platform="":
 vm-test-upgrade platform="":
     vmkit series upgrade "{{platform}}"
 
+# Self-updater coverage in isolation: drive the real `portzero update` against a
+# throwaway local release mirror and assert it detects, downloads, unpacks, and
+# swaps the binary in place. Hermetic (no system mutation); a real cross-version
+# advance also runs when PORTZERO_EXE_OLD points at a prior binary that already
+# understands `update`.
+[macos]
+vm-test-autoupdate platform="":
+    vmkit series autoupdate "{{platform}}"
+
 # Reset to a checkpoint, then run an arbitrary repo script in the guest.
 [macos]
 vm-test-script vm script checkpoint="built" *ARGS:

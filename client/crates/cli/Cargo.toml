@@ -28,6 +28,11 @@ rand = "0.8"
 toml_edit = "0.22"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+[target.'cfg(unix)'.dependencies]
+# Used only for the `geteuid` privilege check in `portzero update`; already in
+# the dependency tree transitively, so this is a zero-cost direct dependency.
+libc = "0.2"
+
 [package.metadata.deb]
 name = "portzero"
 maintainer = "Port Zero Network <support@portzero.cloud>"

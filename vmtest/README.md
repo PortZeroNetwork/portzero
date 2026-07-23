@@ -132,7 +132,7 @@ For anything other than the default script/checkpoint, use
 ## Ad-hoc single-flavor debugging
 
 `just vm-test-local` / `vm-test-staging` / `vm-test-lifecycle` /
-`vm-test-upgrade [platform]` run one slice of the combined flow in isolation,
+`vm-test-upgrade` / `vm-test-autoupdate [platform]` run one slice in isolation,
 useful when iterating on a single phase without paying for the whole
 sequence:
 
@@ -142,15 +142,43 @@ sequence:
 | `vm-test-staging`     | cloud-tunnel smoke against the raw pushed binary — no install |
 | `vm-test-lifecycle`   | real install → verify → uninstall → assert-clean (no upgrade, no tunnel tests) |
 | `vm-test-upgrade`     | prior-version → new-version install, assert nothing duplicated (no tunnel tests) |
+| `vm-test-autoupdate`  | real `portzero update` self-updater: detect → download → unpack → in-place swap against a throwaway local release mirror |
 
 ```
 just vm-test-local linux
 just vm-test-upgrade windows
+just vm-test-autoupdate linux
 ```
 
-These map straight to `vmkit series <flavor> <platform>` for the
-`local`/`staging`/`lifecycle`/`upgrade` flavors declared in `vmkit.conf` —
-the same building blocks `combined` fuses together.
+The `local`/`staging`/`lifecycle`/`upgrade` flavors are the building blocks
+`combined` fuses together; `autoupdate` is a standalone hermetic flavor (its own
+reset per platform, run by `vm-e2e.yml` after the combined pass). All map
+straight to `vmkit series <flavor> <platform>` for the flavors declared in
+`vmkit.conf`.
+
+### Self-update coverage (`autoupdate`)
+
+`autoupdate-{unix.sh,windows.ps1}` exercise the actual `portzero update` command
+— the applier the update notice points to — end to end, without a second build
+or any network. Each builds a throwaway local release mirror (a `version.json`
+in the exact `{"version","commit"}` shape `release.yml` publishes, plus a
+`portzero-<os>-<arch>` archive) in a temp dir and points the updater at it via
+`PZ_TUNNEL_UPDATE_BASE_URL`, then asserts:
+
+- **detect** — `update --check` against a bumped manifest reports an update is available;
+- **apply** — `update --force` downloads, unpacks (system `tar` / `Expand-Archive`),
+  and swaps the binary in place; the result runs and its bytes match the archive
+  (proof of a real swap: a new inode on Unix, a `portzero.old` rename-aside on Windows);
+- **noop** — `update` against a same-version manifest reports up-to-date and swaps nothing;
+- **crossver** *(gated)* — a genuinely older binary passed via `PORTZERO_EXE_OLD`
+  self-updates and its `--version` advances. This SKIPs until a released build that
+  already understands `update` exists — which is exactly the forward-compatibility
+  contract the test protects: an installed binary must keep being able to update
+  itself against whatever we publish next.
+
+Runs are hermetic — isolated temp dirs and `PZ_TUNNEL_UPDATE_SKIP_SETUP=1`, so no
+system integration is touched (the combined flavor already covers the privileged
+install/setup path).
 
 ## Lifecycle coverage: install → use → UNINSTALL → assert-clean
 
