@@ -68,6 +68,37 @@ function Build-Mirror {
     return $mirror
 }
 
+# Point %TEMP%/%TMP% at a fresh Defender-EXCLUDED root for this run, so every
+# unsigned portzero.exe we write — our staged copies, the mirror archives, AND
+# the Rust updater's own extraction dir (std::env::temp_dir() honors TMP/TEMP) —
+# lands in excluded space. Defender otherwise blocks a freshly-written unsigned
+# exe from *starting*, or quarantines the unpacked exe mid-update; the baked
+# `portzero.exe` process-name exclusion is not enough, and combined only works
+# because it runs from the excluded Program Files install dir. SYSTEM (the prlctl
+# exec context) can set the exclusion; it is discarded on the next reset.
+function Enable-ExcludedTemp {
+    $root = Join-Path $env:TEMP ("pz-autoupdate-root-" + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $root | Out-Null
+    if (Get-Command Add-MpPreference -ErrorAction SilentlyContinue) {
+        try { Add-MpPreference -ExclusionPath $root -ErrorAction SilentlyContinue } catch { }
+    }
+    $env:TEMP = $root
+    $env:TMP = $root
+}
+
+# Stage <src> as portzero.exe in a fresh unblocked subdir of the excluded temp
+# root; return the local path. Only reads/copies <src>, never executes it, so a
+# \\Mac\Home share source (UNC + Mark-of-the-Web) is fine here.
+function Stage-LocalExe {
+    param([string] $Src, [string] $Prefix)
+    $dir = Join-Path $env:TEMP ($Prefix + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $dst = Join-Path $dir 'portzero.exe'
+    Copy-Item -LiteralPath $Src -Destination $dst
+    Unblock-File -LiteralPath $dst
+    return $dst
+}
+
 function Find-NewExe {
     if ($env:PORTZERO_EXE -and (Test-Path $env:PORTZERO_EXE)) { return $env:PORTZERO_EXE }
     $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -85,22 +116,20 @@ if (-not $exe -or -not (Test-Path $exe)) {
     "RESULT=FAIL no portzero.exe found (set PORTZERO_EXE or drop one under vmtest\.downloaded-artifacts\windows\)"
     exit 1
 }
-# Copy to a local, unblocked path and run EVERYTHING from there. Never execute
-# the binary straight off the \\Mac\Home share: a UNC path plus Mark-of-the-Web
-# make direct execution unreliable (it can produce no output and a non-zero
-# exit), which would look like a missing subcommand rather than what it is.
-# Reading/copying the share file is fine — only executing it is the problem.
-$installDir = Join-Path $env:TEMP ("pz-autoupdate-" + [guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Force -Path $installDir | Out-Null
-$P = Join-Path $installDir 'portzero.exe'
-Copy-Item -LiteralPath $exe -Destination $P
-Unblock-File -LiteralPath $P
+# Route all temp work into a Defender-excluded root (see Enable-ExcludedTemp),
+# then stage + run the binary from there. Never execute it straight off the
+# \\Mac\Home share (UNC + Mark-of-the-Web) or from a non-excluded dir (Defender
+# blocks an unsigned exe from starting) — either way the process never launches.
+Enable-ExcludedTemp
+$P = Stage-LocalExe -Src $exe -Prefix 'pz-autoupdate-'
 
-# Detect `update` support by EXIT CODE (clap exits 0 for a known subcommand's
-# --help, non-zero for an unrecognized one), not by captured output.
-& $P update --help *> $null
-if ($LASTEXITCODE -ne 0) {
-    "RESULT=FAIL the under-test binary has no ``update`` subcommand (``update --help`` exit $LASTEXITCODE)"
+# Probe `update` support. Capture output so a launch failure (empty $LASTEXITCODE
+# = the process never ran, e.g. Defender still blocking) is diagnosable rather
+# than masquerading as a missing subcommand. clap exits 0 for a known
+# subcommand's --help, non-zero for an unrecognized one.
+$probe = (& $P update --help 2>&1 | Out-String)
+if ("$LASTEXITCODE" -ne '0') {
+    "RESULT=FAIL ``portzero update --help`` did not run cleanly (exit '$LASTEXITCODE'): $($probe.Trim())"
     exit 1
 }
 
@@ -141,15 +170,11 @@ $old = $env:PORTZERO_EXE_OLD
 if (-not $old -or -not (Test-Path $old)) {
     "PHASE=crossver skipped=no-prior-binary (set PORTZERO_EXE_OLD to exercise a real version advance)"
 } else {
-    # Copy + unblock the prior binary too, then probe support by exit code —
-    # same reason as the new binary above (no direct share execution).
-    $oldDir = Join-Path $env:TEMP ("pz-autoupdate-old-" + [guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Force -Path $oldDir | Out-Null
-    $pOld = Join-Path $oldDir 'portzero.exe'
-    Copy-Item -LiteralPath $old -Destination $pOld
-    Unblock-File -LiteralPath $pOld
+    # Stage the prior binary the same way (excluded+unblocked local dir), then
+    # probe support by exit code.
+    $pOld = Stage-LocalExe -Src $old -Prefix 'pz-autoupdate-old-'
     & $pOld update --help *> $null
-    if ($LASTEXITCODE -ne 0) {
+    if ("$LASTEXITCODE" -ne '0') {
         "PHASE=crossver skipped=prior-has-no-update (predates the self-updater; forward-compat contract not yet exercisable)"
     } else {
         $newVer = (Get-Version -Exe $P) -replace '^v', ''
