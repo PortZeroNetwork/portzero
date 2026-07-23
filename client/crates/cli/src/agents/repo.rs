@@ -7,7 +7,8 @@
 //! content preserved, second run is a no-op):
 //! - `.claude/settings.json` — a SessionStart hook that installs portzero,
 //!   guarded so it only runs in a headless cloud sandbox (root, no systemd,
-//!   portzero not yet installed).
+//!   portzero not yet installed), plus a Stop (session-end) cost hook that
+//!   invokes `portzero agents cost-hook`.
 //! - `AGENTS.md` — a marker-delimited instructions block on tunnels + auth
 //!   (mirrored into `CLAUDE.md` only when the repo has one that does not
 //!   already @-include AGENTS.md).
@@ -23,17 +24,31 @@ use super::{print_step, upsert_json_mcp_entry, upsert_markdown_block, write_json
 /// re-run can find and replace it in place instead of appending duplicates.
 const HOOK_ID: &str = "cloud-agent-env-install.sh";
 
+/// Substring identifying the portzero-managed Stop (session-end) cost hook.
+const COST_HOOK_ID: &str = "agents cost-hook";
+
 const INSTALL_URL: &str = "https://raw.githubusercontent.com/PortZeroNetwork/portzero/staging/scripts/cloud-agent-env-install.sh";
 
-/// The full hook command: only in a headless cloud sandbox (running as root,
-/// PID 1 is not systemd, portzero not already installed) fetch and run the
-/// cloud-agent installer. `|| true` keeps the hook silent everywhere else.
+/// The full SessionStart hook command: only in a headless cloud sandbox
+/// (running as root, PID 1 is not systemd, portzero not already installed)
+/// fetch and run the cloud-agent installer. `|| true` keeps the hook silent
+/// everywhere else.
 fn hook_command() -> String {
     format!(
         "[ \"$(id -u)\" = 0 ] && [ ! -d /run/systemd/system ] && \
          ! command -v portzero >/dev/null 2>&1 && \
          curl -fsSL {INSTALL_URL} | bash || true"
     )
+}
+
+/// The Stop (session-end) cost hook command: when portzero is installed, hand
+/// the Claude Code hook's stdin JSON to `portzero agents cost-hook`, which
+/// computes this session's agent-labor cost from usage metadata only and — if
+/// cost tracking is consented for the repo — records it (otherwise it prints a
+/// one-line teaser and persists nothing). `|| true` keeps it silent where
+/// portzero is absent.
+fn cost_hook_command() -> String {
+    "command -v portzero >/dev/null 2>&1 && portzero agents cost-hook || true".to_string()
 }
 
 const REPO_INSTRUCTIONS_BODY: &str = "\
@@ -78,6 +93,7 @@ markers above will be overwritten the next time it runs._";
 pub(super) struct RepoReport {
     root: PathBuf,
     settings_hook: Step,
+    cost_hook: Step,
     agents_md: Step,
     claude_md_mirror: Step,
     mcp_json: Step,
@@ -94,12 +110,11 @@ pub(super) fn find_repo_root(start: &Path) -> Option<PathBuf> {
 
 /// Provision `root` (a git repository root) for cloud AI dev environments.
 pub(super) fn setup(root: &Path, dry_run: bool) -> RepoReport {
+    let settings_path = root.join(".claude").join("settings.json");
     RepoReport {
         root: root.to_path_buf(),
-        settings_hook: upsert_session_start_hook(
-            &root.join(".claude").join("settings.json"),
-            dry_run,
-        ),
+        settings_hook: upsert_session_start_hook(&settings_path, dry_run),
+        cost_hook: upsert_stop_cost_hook(&settings_path, dry_run),
         agents_md: upsert_markdown_block(&root.join("AGENTS.md"), REPO_INSTRUCTIONS_BODY, dry_run),
         claude_md_mirror: mirror_into_claude_md(&root.join("CLAUDE.md"), dry_run),
         mcp_json: upsert_json_mcp_entry(
@@ -116,6 +131,10 @@ pub(super) fn print_report(report: &RepoReport) {
     print_step(
         "  SessionStart install hook (.claude/settings.json)",
         &report.settings_hook,
+    );
+    print_step(
+        "  Stop cost hook (.claude/settings.json)",
+        &report.cost_hook,
     );
     print_step("  Instructions block (AGENTS.md)", &report.agents_md);
     print_step(
@@ -143,9 +162,31 @@ fn mirror_into_claude_md(path: &Path, dry_run: bool) -> Step {
 }
 
 /// Read-modify-write `.claude/settings.json`, inserting (or replacing in
-/// place) the portzero-managed SessionStart hook. All unrelated settings,
-/// hook events, and matcher groups are preserved.
+/// place) the portzero-managed SessionStart install hook. All unrelated
+/// settings, hook events, and matcher groups are preserved.
 fn upsert_session_start_hook(path: &Path, dry_run: bool) -> Step {
+    upsert_managed_hook(path, "SessionStart", HOOK_ID, &hook_command(), dry_run)
+}
+
+/// Read-modify-write `.claude/settings.json`, inserting (or replacing in
+/// place) the portzero-managed Stop (session-end) cost hook. Uses the same
+/// marker-substring idempotency and foreign-key preservation as the
+/// SessionStart hook, under a distinct event and marker.
+fn upsert_stop_cost_hook(path: &Path, dry_run: bool) -> Step {
+    upsert_managed_hook(path, "Stop", COST_HOOK_ID, &cost_hook_command(), dry_run)
+}
+
+/// Read-modify-write `.claude/settings.json`, inserting (or replacing in
+/// place) a portzero-managed hook under `hooks.<event>`, identified by the
+/// `marker` substring. All unrelated settings, hook events, and matcher groups
+/// are preserved.
+fn upsert_managed_hook(
+    path: &Path,
+    event: &str,
+    marker: &str,
+    command: &str,
+    dry_run: bool,
+) -> Step {
     let existing_text = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".to_string());
     let mut root: Value = match serde_json::from_str(&existing_text) {
         Ok(v) => v,
@@ -158,36 +199,35 @@ fn upsert_session_start_hook(path: &Path, dry_run: bool) -> Step {
         ));
     }
 
-    let session_start = root
+    let hooks = root
         .as_object_mut()
         .expect("checked object above")
         .entry("hooks")
         .or_insert_with(|| json!({}));
-    if !session_start.is_object() {
+    if !hooks.is_object() {
         return Step::Failed(format!(
             "\"hooks\" in {} is not a JSON object; resolve manually",
             path.display()
         ));
     }
-    let session_start = session_start
+    let group = hooks
         .as_object_mut()
         .expect("checked object above")
-        .entry("SessionStart")
+        .entry(event.to_string())
         .or_insert_with(|| json!([]));
-    if !session_start.is_array() {
+    if !group.is_array() {
         return Step::Failed(format!(
-            "\"hooks.SessionStart\" in {} is not a JSON array; resolve manually",
+            "\"hooks.{event}\" in {} is not a JSON array; resolve manually",
             path.display()
         ));
     }
 
-    let command = hook_command();
-    match find_managed_hook(session_start) {
-        Some(slot) if slot.as_str() == Some(command.as_str()) => {
+    match find_managed_hook(group, marker) {
+        Some(slot) if slot.as_str() == Some(command) => {
             return Step::AlreadyConfigured(path.display().to_string());
         }
         Some(slot) => *slot = json!(command),
-        None => session_start
+        None => group
             .as_array_mut()
             .expect("checked array above")
             .push(json!({"hooks": [{"type": "command", "command": command}]})),
@@ -200,15 +240,15 @@ fn upsert_session_start_hook(path: &Path, dry_run: bool) -> Step {
 }
 
 /// Find the `command` slot of an existing portzero-managed hook (identified
-/// by the installer script name) anywhere in the SessionStart matcher groups.
-fn find_managed_hook(session_start: &mut Value) -> Option<&mut Value> {
-    session_start
+/// by the `marker` substring) anywhere in an event's matcher groups.
+fn find_managed_hook<'a>(group: &'a mut Value, marker: &str) -> Option<&'a mut Value> {
+    group
         .as_array_mut()?
         .iter_mut()
-        .filter_map(|group| group.get_mut("hooks")?.as_array_mut())
+        .filter_map(|g| g.get_mut("hooks")?.as_array_mut())
         .flatten()
         .filter_map(|hook| hook.as_object_mut()?.get_mut("command"))
-        .find(|command| command.as_str().is_some_and(|c| c.contains(HOOK_ID)))
+        .find(|command| command.as_str().is_some_and(|c| c.contains(marker)))
 }
 
 #[cfg(test)]
@@ -284,6 +324,60 @@ mod tests {
         let second = upsert_session_start_hook(&path, false);
         assert!(matches!(second, Step::AlreadyConfigured(_)));
         assert_eq!(after_first, std::fs::read_to_string(&path).unwrap());
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn stop_cost_hook_preserves_foreign_keys_and_coexists_with_install_hook() {
+        let repo = tmp_repo();
+        let path = repo.join(".claude").join("settings.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{
+              "permissions": {"allow": ["Bash(ls:*)"]},
+              "hooks": {
+                "Stop": [
+                  {"hooks": [{"type": "command", "command": "echo foreign-stop"}]}
+                ]
+              }
+            }"#,
+        )
+        .unwrap();
+
+        // Both managed hooks land without disturbing each other or the foreign one.
+        assert!(matches!(
+            upsert_session_start_hook(&path, false),
+            Step::Updated(_)
+        ));
+        let cost = upsert_stop_cost_hook(&path, false);
+        assert!(matches!(cost, Step::Updated(_)));
+
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        // Foreign key + foreign Stop hook survive.
+        assert_eq!(v["permissions"]["allow"][0], "Bash(ls:*)");
+        assert_eq!(
+            v["hooks"]["Stop"][0]["hooks"][0]["command"],
+            "echo foreign-stop"
+        );
+        // The SessionStart install hook is present.
+        assert!(v["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains(HOOK_ID));
+        // The managed cost hook is appended to Stop, invoking `agents cost-hook`.
+        let stop = v["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(stop.len(), 2, "foreign Stop hook + managed cost hook");
+        let managed = stop[1]["hooks"][0]["command"].as_str().unwrap();
+        assert!(managed.contains(COST_HOOK_ID), "got: {managed}");
+        assert!(managed.contains("command -v portzero"));
+
+        // Idempotent: re-running the cost hook is a no-op.
+        let before = std::fs::read_to_string(&path).unwrap();
+        let second = upsert_stop_cost_hook(&path, false);
+        assert!(matches!(second, Step::AlreadyConfigured(_)));
+        assert_eq!(before, std::fs::read_to_string(&path).unwrap());
 
         let _ = std::fs::remove_dir_all(&repo);
     }
@@ -389,6 +483,7 @@ mod tests {
 
         let first = setup(&repo, false);
         assert!(matches!(first.settings_hook, Step::Updated(_)));
+        assert!(matches!(first.cost_hook, Step::Updated(_)));
         assert!(matches!(first.agents_md, Step::Updated(_)));
         assert!(matches!(first.claude_md_mirror, Step::NotDetected));
         assert!(matches!(first.mcp_json, Step::Updated(_)));
@@ -414,6 +509,7 @@ mod tests {
         );
         let second = setup(&repo, false);
         assert!(matches!(second.settings_hook, Step::AlreadyConfigured(_)));
+        assert!(matches!(second.cost_hook, Step::AlreadyConfigured(_)));
         assert!(matches!(second.agents_md, Step::AlreadyConfigured(_)));
         assert!(matches!(second.mcp_json, Step::AlreadyConfigured(_)));
         let after = (
