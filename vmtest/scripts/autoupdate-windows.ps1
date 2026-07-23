@@ -85,8 +85,22 @@ if (-not $exe -or -not (Test-Path $exe)) {
     "RESULT=FAIL no portzero.exe found (set PORTZERO_EXE or drop one under vmtest\.downloaded-artifacts\windows\)"
     exit 1
 }
-if (-not (& $exe update --help 2>$null)) {
-    "RESULT=FAIL the under-test binary has no ``update`` subcommand"
+# Copy to a local, unblocked path and run EVERYTHING from there. Never execute
+# the binary straight off the \\Mac\Home share: a UNC path plus Mark-of-the-Web
+# make direct execution unreliable (it can produce no output and a non-zero
+# exit), which would look like a missing subcommand rather than what it is.
+# Reading/copying the share file is fine — only executing it is the problem.
+$installDir = Join-Path $env:TEMP ("pz-autoupdate-" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+$P = Join-Path $installDir 'portzero.exe'
+Copy-Item -LiteralPath $exe -Destination $P
+Unblock-File -LiteralPath $P
+
+# Detect `update` support by EXIT CODE (clap exits 0 for a known subcommand's
+# --help, non-zero for an unrecognized one), not by captured output.
+& $P update --help *> $null
+if ($LASTEXITCODE -ne 0) {
+    "RESULT=FAIL the under-test binary has no ``update`` subcommand (``update --help`` exit $LASTEXITCODE)"
     exit 1
 }
 
@@ -94,15 +108,11 @@ if (-not (& $exe update --help 2>$null)) {
 $env:PZ_TUNNEL_NO_UPDATE_CHECK = '1'
 $env:PZ_TUNNEL_UPDATE_SKIP_SETUP = '1'
 
-# Install the new binary at an isolated, writable path.
-$installDir = Join-Path $env:TEMP ("pz-autoupdate-" + [guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Force -Path $installDir | Out-Null
-$P = Join-Path $installDir 'portzero.exe'
-Copy-Item -LiteralPath $exe -Destination $P
-
 # --- detect ----------------------------------------------------------------
-$bumpMirror = Build-Mirror -Bin $exe -Version '99.0.0' -Target $target
-$archiveSha = Get-Sha -Path $exe
+# Build the mirror from the local copy so the archive binary and the swapped-in
+# binary are byte-identical (the provenance assert), and no share exec occurs.
+$bumpMirror = Build-Mirror -Bin $P -Version '99.0.0' -Target $target
+$archiveSha = Get-Sha -Path $P
 $env:PZ_TUNNEL_UPDATE_BASE_URL = $bumpMirror
 $checkOut = (& $P update --check 2>&1 | Out-String)
 Phase 'detect-reports-available' ($checkOut -match '(?i)update is available')
@@ -119,7 +129,7 @@ Phase 'apply-provenance' ((Get-Sha -Path $P) -eq $archiveSha)
 
 # --- noop (up-to-date) -----------------------------------------------------
 $curVer = (Get-Version -Exe $P) -replace '^v', ''
-$sameMirror = Build-Mirror -Bin $exe -Version $curVer -Target $target
+$sameMirror = Build-Mirror -Bin $P -Version $curVer -Target $target
 $env:PZ_TUNNEL_UPDATE_BASE_URL = $sameMirror
 $writeBefore = (Get-Item -LiteralPath $P).LastWriteTimeUtc
 $noopOut = (& $P update 2>&1 | Out-String)
@@ -130,17 +140,23 @@ Phase 'noop-no-swap' ((Get-Item -LiteralPath $P).LastWriteTimeUtc -eq $writeBefo
 $old = $env:PORTZERO_EXE_OLD
 if (-not $old -or -not (Test-Path $old)) {
     "PHASE=crossver skipped=no-prior-binary (set PORTZERO_EXE_OLD to exercise a real version advance)"
-} elseif (-not (& $old update --help 2>$null)) {
-    "PHASE=crossver skipped=prior-has-no-update (predates the self-updater; forward-compat contract not yet exercisable)"
 } else {
-    $newVer = (Get-Version -Exe $exe) -replace '^v', ''
+    # Copy + unblock the prior binary too, then probe support by exit code —
+    # same reason as the new binary above (no direct share execution).
     $oldDir = Join-Path $env:TEMP ("pz-autoupdate-old-" + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force -Path $oldDir | Out-Null
     $pOld = Join-Path $oldDir 'portzero.exe'
     Copy-Item -LiteralPath $old -Destination $pOld
-    $env:PZ_TUNNEL_UPDATE_BASE_URL = (Build-Mirror -Bin $exe -Version $newVer -Target $target)
-    & $pOld update --force *> (Join-Path $env:TEMP 'pz-autoupdate-crossver.log')
-    Phase 'crossver-advanced' (((Get-Version -Exe $pOld) -replace '^v', '') -eq $newVer)
+    Unblock-File -LiteralPath $pOld
+    & $pOld update --help *> $null
+    if ($LASTEXITCODE -ne 0) {
+        "PHASE=crossver skipped=prior-has-no-update (predates the self-updater; forward-compat contract not yet exercisable)"
+    } else {
+        $newVer = (Get-Version -Exe $P) -replace '^v', ''
+        $env:PZ_TUNNEL_UPDATE_BASE_URL = (Build-Mirror -Bin $P -Version $newVer -Target $target)
+        & $pOld update --force *> (Join-Path $env:TEMP 'pz-autoupdate-crossver.log')
+        Phase 'crossver-advanced' (((Get-Version -Exe $pOld) -replace '^v', '') -eq $newVer)
+    }
 }
 
 if ($script:fails -eq 0) {
