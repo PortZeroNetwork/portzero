@@ -64,7 +64,10 @@ login. For Cloud tunnels either:
 wait for them to approve it in a browser (works from remote sandboxes), or
 - `portzero login --github-repo --team <slug>` — autonomous CI-style auth \
 that proves push access to this repository (requires a team trust rule and \
-the Port Zero GitHub App on the repo).
+the Port Zero GitHub App on the repo). Add the trust rule and install/link \
+the GitHub App under Teams → your team → CI & agent credentials on \
+<https://app.portzero.cloud>; see \
+<https://portzero.net/docs/ci-agent-credentials> for the full walkthrough.
 
 Never store tokens or credentials in the repo.
 

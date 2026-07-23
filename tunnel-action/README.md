@@ -141,6 +141,20 @@ The minted credential is masked in logs (`::add-mask::`), written to
 `~/.portzero/auth.json` (mode `600`) before the daemon starts, and expires on
 its own — nothing to revoke after the job.
 
+### Team tunnels
+
+A team owns the subdomain suffix `--<team-slug>`. Tunnels registered by
+members, CI, and agents are named `<label>--<team-slug>.tunnel.portzero.cloud`;
+you choose `<label>` and Port Zero appends `--<team-slug>`. Labels cannot
+contain `--`.
+
+The tunnel name must also match one of the team's trust-rule templates (for
+example `ci-{run-id}`), configured in the dashboard's **CI & agent
+credentials** section. If the team requires a team subdomain, `PZ_TUNNEL`
+must be `<label>--<team-slug>` — a bare label is rejected with a `403`.
+
+Full walkthrough: <https://portzero.net/docs/ci-agent-credentials>.
+
 ## Container jobs
 
 `jobs.<id>.container: ...` runs your steps inside a Docker container. The
