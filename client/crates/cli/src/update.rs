@@ -13,8 +13,6 @@ use anyhow::Result;
 use serde::Deserialize;
 use tokio::time::timeout;
 
-const RELEASES_BASE_URL: &str = "https://github.com/PortZeroNetwork/portzero/releases";
-
 /// Minimum interval between remote checks.
 const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -22,9 +20,13 @@ const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Shape of the version manifest uploaded alongside release artifacts.
+///
+/// `pub(crate)` so the self-updater ([`crate::selfupdate`]) parses the exact
+/// same shape the checker does — a manifest-format change breaks both at once,
+/// which is what the version-manifest schema test locks down.
 #[derive(Deserialize)]
-struct VersionManifest {
-    version: String,
+pub(crate) struct VersionManifest {
+    pub(crate) version: String,
 }
 
 /// Path to the timestamp file that records when we last checked.
@@ -72,7 +74,7 @@ fn record_check() {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-struct Version {
+pub(crate) struct Version {
     major: u64,
     minor: u64,
     patch: u64,
@@ -130,7 +132,7 @@ fn compare_prerelease_identifiers(left: &str, right: &str) -> Ordering {
 }
 
 /// Parse a SemVer string, ignoring any leading `v`.
-fn parse_semver(s: &str) -> Option<Version> {
+pub(crate) fn parse_semver(s: &str) -> Option<Version> {
     let s = s.strip_prefix('v').unwrap_or(s);
     let (core, prerelease) = match s.split_once('-') {
         Some((core, prerelease)) => (core, Some(prerelease.to_string())),
@@ -151,13 +153,18 @@ fn parse_semver(s: &str) -> Option<Version> {
     })
 }
 
-fn version_url() -> String {
+pub(crate) fn version_url() -> String {
     // `version.json` is uploaded as a GitHub Release asset by
     // .github/workflows/release.yml; GitHub's /releases/latest/download/<asset>
     // always resolves to the newest stable release. GitHub exposes no static
     // "latest prerelease" URL and this repo publishes no separate staging
-    // channel, so all builds track the latest stable release.
-    format!("{RELEASES_BASE_URL}/latest/download/version.json")
+    // channel, so all builds track the latest stable release. The base
+    // (and its `PZ_TUNNEL_UPDATE_BASE_URL` test override) is the single source
+    // in `portzero_domain::endpoints`, shared with the self-updater.
+    format!(
+        "{}/version.json",
+        portzero_domain::endpoints::update_download_base()
+    )
 }
 
 /// Run the update check.  Intended to be called with `tokio::spawn` so it
@@ -186,7 +193,7 @@ pub async fn check_for_update() {
     }
 }
 
-async fn fetch_latest_version() -> Result<Option<String>> {
+pub(crate) async fn fetch_latest_version() -> Result<Option<String>> {
     let client = reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
         .build()?;
@@ -203,32 +210,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_releases_base_url_points_to_correct_repo() {
-        // Verify the URL points to the correct organization and repo, not the old one
-        assert!(
-            RELEASES_BASE_URL.contains("PortZeroNetwork/portzero"),
-            "RELEASES_BASE_URL must contain PortZeroNetwork/portzero, got: {}",
-            RELEASES_BASE_URL
-        );
-        assert!(
-            !RELEASES_BASE_URL.contains("LoumTechnologies"),
-            "RELEASES_BASE_URL must not contain LoumTechnologies (old org)"
-        );
-        assert!(
-            !RELEASES_BASE_URL.contains("port-zero"),
-            "RELEASES_BASE_URL must not contain 'port-zero' (old repo name)"
-        );
-    }
-
-    #[test]
-    fn test_version_url_format() {
+    fn test_version_url_default_format() {
+        // With no override, the check must resolve to the newest stable
+        // release's version.json on the current repo. The org/repo pinning
+        // itself is asserted in portzero_domain::endpoints tests.
+        std::env::remove_var("PZ_TUNNEL_UPDATE_BASE_URL");
+        std::env::remove_var("PZ_TUNNEL_RELEASES_URL");
         let url = version_url();
         assert_eq!(
             url,
             "https://github.com/PortZeroNetwork/portzero/releases/latest/download/version.json"
         );
-        assert!(url.contains("PortZeroNetwork/portzero"));
-        assert!(url.contains("/latest/download/version.json"));
+    }
+
+    #[test]
+    fn test_version_url_honours_base_override() {
+        // The self-update test harness points the checker + updater at a local
+        // release mirror; version.json must be fetched from there.
+        std::env::set_var("PZ_TUNNEL_UPDATE_BASE_URL", "http://127.0.0.1:9/mirror");
+        assert_eq!(version_url(), "http://127.0.0.1:9/mirror/version.json");
+        std::env::remove_var("PZ_TUNNEL_UPDATE_BASE_URL");
     }
 
     #[test]
