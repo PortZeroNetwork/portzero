@@ -18,6 +18,7 @@ mod frontdoor;
 mod github_repo_login;
 mod inspect;
 mod mcp;
+mod mcp_feedback;
 mod review;
 mod setup;
 mod skill;

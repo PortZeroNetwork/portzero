@@ -42,6 +42,9 @@ tools over guessing ports or grepping `.env` files:
 - `observed_edges` — who-talks-to-whom dependency edges observed at runtime
 - `exercised_routes` — HTTP routes actually hit per tunnel (smoke-test list)
 - `list_feedback` / `propose_fix` — portzero.cloud review threads (requires `portzero login`)
+- `submit_bug_report` — report a bug in Port Zero itself to the team (requires `portzero login`)
+- `submit_feature_request` — request a Port Zero feature, but only when it would make things \
+much easier for the user, and only after asking the user first (requires `portzero login`)
 
 Run `portzero inspect` for the human-readable equivalent, or `portzero skill \
 install` to add a PaaS-agnostic production-config extraction skill to a \

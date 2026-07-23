@@ -12,11 +12,14 @@
 //! - `exercised_routes`  — HTTP routes actually hit per tunnel (smoke-test list)
 //! - `list_feedback`     — reviewer feedback threads from portzero.cloud
 //! - `propose_fix`       — mark a feedback thread as fixed by a commit
+//! - `submit_bug_report`      — report a bug in Port Zero to the team
+//! - `submit_feature_request` — request a Port Zero feature (see `mcp_feedback`)
 //!
 //! Local data is read fresh from the daemon's state files on each call, so it
-//! reflects current truth; the feedback tools call the portzero.cloud API and
-//! require `portzero login`. See `portzero inspect` for the human-readable
-//! view.
+//! reflects current truth; the cloud-backed tools (feedback, bug/feature
+//! reports) call the portzero.cloud API and require `portzero login`. The two
+//! `submit_*` tools live in `mcp_feedback` to keep this file within the client
+//! file-size budget. See `portzero inspect` for the human-readable view.
 
 use std::io::{BufRead, Write};
 
@@ -113,7 +116,7 @@ fn handle_method(method: &str, params: Option<&Value>) -> Result<Value, String> 
 /// portzero.cloud API.
 fn tool_list() -> Value {
     let no_args = json!({ "type": "object", "properties": {} });
-    json!([
+    let mut tools = json!([
         {
             "name": "overview",
             "description": "Everything the daemon knows at once: discovered services, \
@@ -192,7 +195,13 @@ fn tool_list() -> Value {
                 "required": ["thread_id", "fix_commit", "fix_summary"],
             },
         },
-    ])
+    ]);
+    // The bug-report / feature-request tools live in `mcp_feedback` (keeps this
+    // file within the client file-size budget).
+    if let Value::Array(arr) = &mut tools {
+        arr.extend(crate::mcp_feedback::report_tools());
+    }
+    tools
 }
 
 /// Execute a tool by name, returning a `tools/call` result envelope.
@@ -204,6 +213,10 @@ fn call_tool(name: &str, arguments: Option<&Value>) -> Result<Value, String> {
     match name {
         "list_feedback" => return Ok(list_feedback(arguments)),
         "propose_fix" => return Ok(propose_fix(arguments)),
+        "submit_bug_report" => return Ok(crate::mcp_feedback::submit_report("bug", arguments)),
+        "submit_feature_request" => {
+            return Ok(crate::mcp_feedback::submit_report("feature", arguments))
+        }
         _ => {}
     }
 
@@ -221,7 +234,7 @@ fn call_tool(name: &str, arguments: Option<&Value>) -> Result<Value, String> {
 }
 
 /// Wrap a JSON value as a successful `tools/call` result (text content block).
-fn tool_ok(value: &Value) -> Value {
+pub(crate) fn tool_ok(value: &Value) -> Value {
     // MCP tools return content blocks; we return the JSON as a text block.
     let text = serde_json::to_string_pretty(value).unwrap_or_else(|_| "{}".to_string());
     json!({
@@ -231,7 +244,7 @@ fn tool_ok(value: &Value) -> Value {
 }
 
 /// Wrap a message as a failed `tools/call` result (`isError: true`).
-fn tool_error(message: &str) -> Value {
+pub(crate) fn tool_error(message: &str) -> Value {
     json!({
         "content": [ { "type": "text", "text": message } ],
         "isError": true,
@@ -239,7 +252,7 @@ fn tool_error(message: &str) -> Value {
 }
 
 /// Message returned when the cloud tools are used without `portzero login`.
-const NOT_LOGGED_IN: &str = "Not logged in. Run `portzero login` to authenticate.";
+pub(crate) const NOT_LOGGED_IN: &str = "Not logged in. Run `portzero login` to authenticate.";
 
 /// Run a future to completion on a dedicated thread with its own runtime.
 ///
@@ -247,7 +260,7 @@ const NOT_LOGGED_IN: &str = "Not logged in. Run `portzero login` to authenticate
 /// the CLI's tokio runtime — blocking that runtime's worker (or nesting a
 /// second `block_on`) panics. A scoped thread with a fresh current-thread
 /// runtime works from any calling context.
-fn run_async<T: Send>(fut: impl std::future::Future<Output = T> + Send) -> T {
+pub(crate) fn run_async<T: Send>(fut: impl std::future::Future<Output = T> + Send) -> T {
     std::thread::scope(|scope| {
         scope
             .spawn(|| {
@@ -364,7 +377,7 @@ fn propose_fix(arguments: Option<&Value>) -> Value {
 }
 
 /// Extract a required non-empty string argument, with a descriptive error.
-fn required_string_arg(arguments: Option<&Value>, key: &str) -> Result<String, String> {
+pub(crate) fn required_string_arg(arguments: Option<&Value>, key: &str) -> Result<String, String> {
     arguments
         .and_then(|a| a.get(key))
         .and_then(Value::as_str)
