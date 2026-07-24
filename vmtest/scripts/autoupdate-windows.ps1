@@ -12,8 +12,13 @@
 # running .exe in place (rename-aside + copy) — no network, no second build.
 #
 # Mirrors autoupdate-unix.sh. Because a running .exe can't be overwritten, the
-# updater renames it aside as `portzero.old`; the swap assertions key off that
-# and off byte-provenance instead of the inode change the unix side uses.
+# updater renames it aside as `portzero.old` and copies the new build into
+# place. The swap assertion keys off the running binary's NTFS file identity
+# changing (volume serial + file index — the Windows analog of the inode the
+# unix side compares), which a rename-aside-then-copy always changes. It does
+# NOT key off the moved-aside `portzero.old` lingering: that backup is a
+# best-effort rollback net the OS only unlocks after the updater process exits,
+# and asserting its post-exit survival flaked (see git history of this file).
 #
 # Phases (greppable: `PHASE=<name> ... ok=<true|false>`, then RESULT=PASS|FAIL):
 #   detect    `update --check` reports an available update against a bumped manifest
@@ -42,6 +47,52 @@ function Get-Version {
     catch { return '' }
 }
 function Get-Sha { param([string] $Path) return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash }
+
+# NTFS file identity (volume serial + 64-bit file index) — the Windows analog of
+# a Unix inode. Distinct files have distinct identities, so it detects that the
+# running .exe was replaced by a freshly-created file even when the bytes match.
+# Returns $null if the file can't be opened.
+if (-not ([System.Management.Automation.PSTypeName]'PZ.Fs').Type) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+namespace PZ {
+  [StructLayout(LayoutKind.Sequential)]
+  public struct ByHandleFileInformation {
+    public uint FileAttributes;
+    public long CreationTime;
+    public long LastAccessTime;
+    public long LastWriteTime;
+    public uint VolumeSerialNumber;
+    public uint FileSizeHigh;
+    public uint FileSizeLow;
+    public uint NumberOfLinks;
+    public uint FileIndexHigh;
+    public uint FileIndexLow;
+  }
+  public static class Fs {
+    [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+    static extern SafeFileHandle CreateFileW(string name, uint access, uint share,
+      IntPtr sec, uint disp, uint flags, IntPtr templ);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool GetFileInformationByHandle(SafeFileHandle h, out ByHandleFileInformation info);
+    public static string FileId(string path) {
+      // FILE_READ_ATTRIBUTES=0x80, FILE_SHARE_READ|WRITE|DELETE=7,
+      // OPEN_EXISTING=3, FILE_FLAG_BACKUP_SEMANTICS=0x02000000.
+      using (var h = CreateFileW(path, 0x80, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero)) {
+        if (h.IsInvalid) return null;
+        ByHandleFileInformation info;
+        if (!GetFileInformationByHandle(h, out info)) return null;
+        return info.VolumeSerialNumber.ToString("x8") + ":" +
+               info.FileIndexHigh.ToString("x8") + info.FileIndexLow.ToString("x8");
+      }
+    }
+  }
+}
+"@
+}
+function Get-FileId { param([string] $Path) return [PZ.Fs]::FileId($Path) }
 
 function Get-Target {
     switch ($env:PROCESSOR_ARCHITECTURE) {
@@ -149,12 +200,22 @@ Phase 'detect-reports-available' ($checkOut -match '(?i)update is available')
 # --- apply -----------------------------------------------------------------
 $backup = [System.IO.Path]::ChangeExtension($P, 'old')
 if (Test-Path $backup) { Remove-Item -Force $backup -ErrorAction SilentlyContinue }
+$idBefore = Get-FileId -Path $P
 & $P update --force *> (Join-Path $env:TEMP 'pz-autoupdate-apply.log')
 Phase 'apply-exit-zero' ($LASTEXITCODE -eq 0)
 Phase 'apply-binary-runs' ((Get-Version -Exe $P) -ne '')
-# The running .exe is renamed aside as portzero.old before the new one lands.
-Phase 'apply-swapped-binary' (Test-Path $backup)
+# Proof the running .exe was actually replaced: its NTFS file identity changes
+# when the updater renames it aside and copies the new build into place (the
+# inode-change analog the unix side asserts). Identity-based, so it holds even
+# though the hermetic mirror's bytes match the original — and it does not depend
+# on the moved-aside portzero.old surviving process exit, which flaked before.
+$idAfter = Get-FileId -Path $P
+Phase 'apply-swapped-binary' ($idBefore -and $idAfter -and ($idAfter -ne $idBefore))
 Phase 'apply-provenance' ((Get-Sha -Path $P) -eq $archiveSha)
+# Informational only: the rollback backup the Windows updater leaves behind.
+# Its post-exit survival is environment-dependent, so this is observed, not
+# asserted (identity above is the hard swap proof). Greppable for diagnosis.
+"NOTE=apply-backup-present old=$([bool](Test-Path $backup)) idBefore=$idBefore idAfter=$idAfter"
 
 # --- noop (up-to-date) -----------------------------------------------------
 $curVer = (Get-Version -Exe $P) -replace '^v', ''
