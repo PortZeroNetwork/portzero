@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 
 use crate::update::{parse_semver, VersionManifest};
 
@@ -291,7 +291,7 @@ fn replace_running_binary(new_bin: &Path) -> Result<PathBuf> {
 
     let current = std::env::current_exe().context("locating the current executable")?;
     let dir = current.parent().ok_or_else(|| {
-        anyhow!(
+        anyhow::anyhow!(
             "current binary {} has no parent directory",
             current.display()
         )
