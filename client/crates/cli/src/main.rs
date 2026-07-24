@@ -33,6 +33,7 @@ mod inspect;
 mod mcp;
 mod mcp_cost;
 mod mcp_feedback;
+mod purge;
 mod review;
 mod selfupdate;
 mod setup;
@@ -178,6 +179,14 @@ enum Command {
     },
     /// Log out and remove stored credentials.
     Logout,
+    /// Erase all local personal data under ~/.portzero/ (credentials, agent
+    /// cost metadata, observations, the daemon log, and daemon state files).
+    ///
+    /// Unlike `logout` (which removes only auth.json), this clears everything
+    /// the client stores locally. It never touches Port Zero's servers. Stop
+    /// the daemon first (`portzero stop`) — purge refuses while it is running.
+    /// See docs/users/privacy.md for the full inventory.
+    Purge,
     /// Show the currently authenticated user.
     Whoami,
 
@@ -390,6 +399,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Logout => auth::logout()?,
+        Command::Purge => purge::run()?,
         Command::Whoami => auth::whoami().await?,
 
         Command::Review {

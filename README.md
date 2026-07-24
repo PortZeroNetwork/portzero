@@ -101,6 +101,22 @@ day. See [docs/developers/desktop-app.md](docs/developers/desktop-app.md) for
 how the app is built, and [portzero.net/docs](https://portzero.net/docs) for
 usage docs.
 
+## Privacy
+
+Port Zero Local (`*.portzero.local`) tunnels stay entirely on your machine.
+Cloud tunnels (`*.tunnel.portzero.cloud`) transmit tunnel metadata and the
+tunneled traffic to Port Zero's servers. For the exact list of what the client
+sends and what it stores under `~/.portzero/`, see the
+[privacy notice](docs/users/privacy.md) (canonical published copy at
+[portzero.net/docs](https://portzero.net/docs)).
+
+Log out to remove your credentials, or erase all local data with:
+
+```sh
+portzero stop
+portzero purge
+```
+
 ## Licensing
 
 - **Port Zero Local** (tunnels using `*.portzero.local`): governed by the [GNU General Public License v3.0](LICENSE). See the [LICENSE](LICENSE) file.
