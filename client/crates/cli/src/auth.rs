@@ -364,7 +364,11 @@ pub async fn login(interactive: bool, email: Option<String>, _name: Option<Strin
 /// Remove stored credentials.
 pub fn logout() -> Result<()> {
     AuthConfig::remove()?;
-    println!("Logged out. Credentials removed.");
+    println!("Logged out. Credentials removed (~/.portzero/auth.json).");
+    println!(
+        "To also erase local cost metadata, observations, logs, and daemon \
+         state, run `portzero purge`."
+    );
     Ok(())
 }
 
