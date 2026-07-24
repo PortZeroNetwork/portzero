@@ -313,6 +313,7 @@ fn replace_running_binary(new_bin: &Path) -> Result<PathBuf> {
 fn replace_running_binary(new_bin: &Path) -> Result<PathBuf> {
     let current = std::env::current_exe().context("locating the current executable")?;
     let backup = current.with_extension("old");
+    // Clear any `.old` left by a previous update before we move this one aside.
     let _ = std::fs::remove_file(&backup);
     std::fs::rename(&current, &backup)
         .with_context(|| format!("moving the running binary {} aside", current.display()))?;
@@ -324,8 +325,11 @@ fn replace_running_binary(new_bin: &Path) -> Result<PathBuf> {
             current.display()
         )));
     }
-    // The moved-aside file is locked while this process runs; cleaned next launch.
-    let _ = std::fs::remove_file(&backup);
+    // Keep the moved-aside `.old` binary as a rollback safety net. It is cleared
+    // at the start of the *next* update (the remove_file above), so at most one
+    // stale copy ever lingers. Deleting it here would race the still-running
+    // process that is executing from it — and on some Windows builds that delete
+    // succeeds, silently discarding the backup — so we deliberately leave it.
     Ok(current)
 }
 

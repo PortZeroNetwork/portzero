@@ -87,6 +87,46 @@ assert_not() {
     fi
 }
 
+# retry <attempts> <sleep-seconds> <cmd...> : run until it succeeds or attempts
+# run out. This job shares one physical Mac with the other guests (see
+# vm-e2e.yml), so a subprocess here can transiently lose to memory pressure while
+# another VM suspends — the run that motivated this saw the local-tunnel server
+# OOM-killed and a 15-minute VM-stop stall. Retrying the *idempotent* trust and
+# verify operations keeps that host-load blip from reding an otherwise-correct
+# result; a genuine regression still fails every attempt and surfaces.
+retry() {
+    local attempts="$1" sleep_s="$2"; shift 2
+    local i=1
+    while true; do
+        "$@" && return 0
+        [ "$i" -ge "$attempts" ] && return 1
+        i=$((i + 1)); sleep "$sleep_s"
+    done
+}
+negate() { ! "$@"; }
+# assert_eventually / assert_not_eventually : like assert / assert_not, but give
+# the condition a few tries first — for checks that shell out to openssl or the
+# daemon and can momentarily fail under host load rather than because the state
+# is wrong.
+assert_eventually() {
+    local phase="$1"; shift
+    if retry 5 2 "$@" >/dev/null 2>&1; then
+        echo "PHASE=$phase ok=true"
+    else
+        echo "PHASE=$phase ok=false"
+        fails=$((fails + 1))
+    fi
+}
+assert_not_eventually() {
+    local phase="$1"; shift
+    if retry 5 2 negate "$@" >/dev/null 2>&1; then
+        echo "PHASE=$phase ok=true"
+    else
+        echo "PHASE=$phase ok=false"
+        fails=$((fails + 1))
+    fi
+}
+
 has_cap() { # <cap-substring>
     local caps; caps="$(getcap "$BIN" 2>/dev/null || true)"
     case "$caps" in *"$1"*) return 0 ;; *) return 1 ;; esac
@@ -267,15 +307,17 @@ assert install-systemd-unit      test -f "$SYSTEM_UNIT"
 
 echo ">> installing local CA into the system trust store"
 sudo_ env HOME="$HOME" "$BIN" trust generate >/dev/null 2>&1 || true
-sudo_ env HOME="$HOME" "$BIN" trust install  >/dev/null 2>&1 || true
+# Retry: `trust install` runs update-ca-certificates, which can be OOM-killed
+# under host load; a killed run leaves the bundle un-regenerated (see retry note).
+retry 3 2 sudo_ env HOME="$HOME" "$BIN" trust install >/dev/null 2>&1 || true
 assert trust-install-anchor  test -e "$CA_DEBIAN" -o -e "$CA_RHEL"
 assert trust-install-config  config_has_ca_line
-assert trust-install-bundle  bundle_has_ca
+assert_eventually trust-install-bundle  bundle_has_ca
 
 echo ">> enabling autostart (systemd user unit)"
 "$BIN" autostart enable >/dev/null 2>&1 || true
 assert autostart-user-unit   test -f "$USER_UNIT"
-assert autostart-status      autostart_installed
+assert_eventually autostart-status      autostart_installed
 
 # --- 2. LOCAL TUNNEL TEST (real TUN + scoped DNS + local proxy) ------------
 echo ">> local-tunnel test against the installed binary"
@@ -340,7 +382,9 @@ fi
 
 # --- 5. UNINSTALL (the way a user removes it) ------------------------------
 echo ">> running trust uninstall + autostart disable"
-sudo_ env HOME="$HOME" "$BIN" trust uninstall >/dev/null 2>&1 || true
+# Retry for the same reason as install: uninstall runs update-ca-certificates
+# --fresh to rebuild the bundle without our anchor; a killed run leaves it stale.
+retry 3 2 sudo_ env HOME="$HOME" "$BIN" trust uninstall >/dev/null 2>&1 || true
 "$BIN" autostart disable >/dev/null 2>&1 || true
 echo ">> removing the package (dpkg --purge exercises prerm)"
 sudo_ dpkg --purge portzero >/tmp/pz-dpkg-r.log 2>&1 || sudo_ dpkg -r portzero >/tmp/pz-dpkg-r.log 2>&1 || true
@@ -355,7 +399,7 @@ assert_not clean-ca-anchor       test -e "$CA_DEBIAN"
 assert_not clean-ca-anchor-rhel  test -e "$CA_RHEL"
 assert_not clean-ca-ssl-pem      test -e "$CA_SSL_PEM"
 assert_not clean-ca-config       config_has_ca_line
-assert_not clean-ca-bundle       bundle_has_ca
+assert_not_eventually clean-ca-bundle       bundle_has_ca
 
 if [ "$fails" -eq 0 ]; then
     echo "RESULT=PASS combined (install -> local-tunnel -> upgrade -> cloud-tunnel -> uninstall -> assert-clean)"
