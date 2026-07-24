@@ -100,7 +100,14 @@ write_cli_auth() {
 }
 
 start_local_service() {
-  printf '%s\n' "${EXPECTED_BODY}" > "${HTTP_DIR}/index.html"
+  # Serve the probe as a .txt (text/plain), NOT index.html (text/html). Cloud
+  # tunnels on comments-enabled plans (professional/team/enterprise) have the
+  # edge inject the feedback-comment widget `<script>` into HTML responses and
+  # recompute content-length — correct product behavior, but it mutates the
+  # body so an exact-match on an HTML page would never equal ${EXPECTED_BODY}.
+  # A non-HTML body passes through the edge byte-identical, so this stays a
+  # faithful test of the client's tunnel data path. Request /probe.txt below.
+  printf '%s\n' "${EXPECTED_BODY}" > "${HTTP_DIR}/probe.txt"
   (
     cd "${HTTP_DIR}"
     # http.server's HTTPServer.server_bind() unconditionally calls
@@ -168,7 +175,7 @@ approve_route() {
 
 curl_public_tunnel() {
   for i in $(seq 1 30); do
-    body="$(curl -fsS --connect-timeout 5 --max-time 10 "https://${TUNNEL_DOMAIN}/" || true)"
+    body="$(curl -fsS --connect-timeout 5 --max-time 10 "https://${TUNNEL_DOMAIN}/probe.txt" || true)"
     if [ "${body}" = "${EXPECTED_BODY}" ]; then
       echo "Public tunnel returned expected response."
       return 0
@@ -177,7 +184,7 @@ curl_public_tunnel() {
     sleep 2
   done
 
-  echo "Public tunnel did not return expected response from https://${TUNNEL_DOMAIN}/" >&2
+  echo "Public tunnel did not return expected response from https://${TUNNEL_DOMAIN}/probe.txt" >&2
   exit 1
 }
 

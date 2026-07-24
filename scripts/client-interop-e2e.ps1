@@ -109,7 +109,14 @@ function Write-CliAuth {
 }
 
 function Start-LocalService {
-    Set-Content -Path (Join-Path $HttpDir "index.html") -Value $ExpectedBody -NoNewline
+    # Serve the probe as a .txt (text/plain), NOT index.html (text/html). Cloud
+    # tunnels on comments-enabled plans (professional/team/enterprise) have the
+    # edge inject the feedback-comment widget <script> into HTML responses and
+    # recompute content-length — correct product behavior, but it mutates the
+    # body so an exact-match on an HTML page would never equal $ExpectedBody. A
+    # non-HTML body passes through the edge byte-identical, so this stays a
+    # faithful test of the client's tunnel data path. Request /probe.txt below.
+    Set-Content -Path (Join-Path $HttpDir "probe.txt") -Value $ExpectedBody -NoNewline
     $env:PZ_TUNNEL = "${TunnelDomain}:80"
 
     $stderrLog = Join-Path $WorkDir "http.log"
@@ -201,7 +208,7 @@ function Approve-Route {
 function Test-PublicTunnel {
     for ($i = 1; $i -le 30; $i++) {
         try {
-            $resp = Invoke-WebRequest -Uri "https://$TunnelDomain/" -TimeoutSec 10 -UseBasicParsing
+            $resp = Invoke-WebRequest -Uri "https://$TunnelDomain/probe.txt" -TimeoutSec 10 -UseBasicParsing
             if ($resp.Content.Trim() -eq $ExpectedBody) {
                 Write-Host "Public tunnel returned expected response."
                 return
@@ -213,7 +220,7 @@ function Test-PublicTunnel {
         Start-Sleep -Seconds 2
     }
 
-    throw "Public tunnel did not return expected response from https://$TunnelDomain/"
+    throw "Public tunnel did not return expected response from https://$TunnelDomain/probe.txt"
 }
 
 try {
