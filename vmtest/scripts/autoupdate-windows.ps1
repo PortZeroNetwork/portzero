@@ -58,7 +58,11 @@ using System;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 namespace PZ {
-  [StructLayout(LayoutKind.Sequential)]
+  // Pack=4: BY_HANDLE_FILE_INFORMATION is a naturally 4-byte-packed C struct
+  // (all DWORD / FILETIME fields). Without this, the CLR 8-byte-aligns the long
+  // FILETIME fields and every field past FileAttributes reads at the wrong
+  // offset (VolumeSerialNumber came back 0, file index shifted).
+  [StructLayout(LayoutKind.Sequential, Pack=4)]
   public struct ByHandleFileInformation {
     public uint FileAttributes;
     public long CreationTime;
@@ -216,6 +220,19 @@ Phase 'apply-provenance' ((Get-Sha -Path $P) -eq $archiveSha)
 # Its post-exit survival is environment-dependent, so this is observed, not
 # asserted (identity above is the hard swap proof). Greppable for diagnosis.
 "NOTE=apply-backup-present old=$([bool](Test-Path $backup)) idBefore=$idBefore idAfter=$idAfter"
+# One-shot diagnosis of where the updater actually swapped: the applier prints
+# `Updated portzero: v.. -> v.. (<current_exe>)`, which is the path it renamed
+# aside + replaced. If that path differs from $P, the swap is landing somewhere
+# other than the binary the test runs. Also list $P's directory so a stray
+# portzero.old / new file is visible.
+"DIAG=staged-exe path=$P"
+$applyLog = Join-Path $env:TEMP 'pz-autoupdate-apply.log'
+if (Test-Path $applyLog) {
+    foreach ($line in (Get-Content -LiteralPath $applyLog)) { "DIAG-applylog| $line" }
+}
+foreach ($f in (Get-ChildItem -LiteralPath (Split-Path -Parent $P) -Force -ErrorAction SilentlyContinue)) {
+    "DIAG-stagedir| $($f.Name)"
+}
 
 # --- noop (up-to-date) -----------------------------------------------------
 $curVer = (Get-Version -Exe $P) -replace '^v', ''
