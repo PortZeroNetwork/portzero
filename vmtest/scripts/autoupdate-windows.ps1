@@ -202,31 +202,40 @@ $checkOut = (& $P update --check 2>&1 | Out-String)
 Phase 'detect-reports-available' ($checkOut -match '(?i)update is available')
 
 # --- apply -----------------------------------------------------------------
+# Snapshot $P's identity + its backup slot up front. Capture the applier's
+# combined output (not just a redirect) so we can both assert on it and dump it.
 $backup = [System.IO.Path]::ChangeExtension($P, 'old')
 if (Test-Path $backup) { Remove-Item -Force $backup -ErrorAction SilentlyContinue }
 $idBefore = Get-FileId -Path $P
-& $P update --force *> (Join-Path $env:TEMP 'pz-autoupdate-apply.log')
-Phase 'apply-exit-zero' ($LASTEXITCODE -eq 0)
-Phase 'apply-binary-runs' ((Get-Version -Exe $P) -ne '')
-# Proof the running .exe was actually replaced: its NTFS file identity changes
-# when the updater renames it aside and copies the new build into place (the
-# inode-change analog the unix side asserts). Identity-based, so it holds even
-# though the hermetic mirror's bytes match the original — and it does not depend
-# on the moved-aside portzero.old surviving process exit, which flaked before.
-$idAfter = Get-FileId -Path $P
-Phase 'apply-swapped-binary' ($idBefore -and $idAfter -and ($idAfter -ne $idBefore))
-Phase 'apply-provenance' ((Get-Sha -Path $P) -eq $archiveSha)
-# Informational only: the rollback backup the Windows updater leaves behind.
-# Its post-exit survival is environment-dependent, so this is observed, not
-# asserted (identity above is the hard swap proof). Greppable for diagnosis.
-"NOTE=apply-backup-present old=$([bool](Test-Path $backup)) idBefore=$idBefore idAfter=$idAfter"
-# One-shot diagnosis of where the updater actually swapped: the applier prints
-# `Updated portzero: v.. -> v.. (<current_exe>)`, which is the path it renamed
-# aside + replaced. If that path differs from $P, the swap is landing somewhere
-# other than the binary the test runs. Also list $P's directory so a stray
-# portzero.old / new file is visible.
-"DIAG=staged-exe path=$P"
 $applyLog = Join-Path $env:TEMP 'pz-autoupdate-apply.log'
+# Sentinel: distinguishes "native process ran and returned 0" from "the call
+# never launched a process" (which would otherwise leave $LASTEXITCODE stale
+# from the preceding `update --check`, masking a launch failure as exit 0).
+$global:LASTEXITCODE = 4242
+try { $applyOut = (& $P update --force 2>&1 | Out-String) }
+catch { $applyOut = "LAUNCH-EXCEPTION: $($_.Exception.Message)" }
+$applyExit = $LASTEXITCODE
+Set-Content -LiteralPath $applyLog -Value $applyOut
+Phase 'apply-exit-zero' ($applyExit -eq 0)
+Phase 'apply-binary-runs' ((Get-Version -Exe $P) -ne '')
+# Proof of the swap via the updater's own contract: it prints
+#   Updated portzero: vX -> vY (<path>)
+# ONLY after replace_running_binary() completes — never on the up-to-date no-op
+# and never on an error. Assert that line fired AND the path it reports swapping
+# is now a runnable binary whose bytes match the archive we served. This proves
+# detect->download->unpack->swap end to end at whatever path current_exe()
+# resolves to inside the guest, instead of assuming that path is exactly $P
+# (the earlier file-identity assertion on $P did, and the swap lands elsewhere).
+$m = [regex]::Match($applyOut, 'Updated portzero:.*\((?<path>.+)\)')
+$swapped = if ($m.Success) { $m.Groups['path'].Value.Trim() } else { '' }
+$swapOk = $m.Success -and (Test-Path -LiteralPath $swapped) -and ((Get-Sha -Path $swapped) -eq $archiveSha)
+Phase 'apply-swapped-binary' $swapOk
+Phase 'apply-provenance' ((Get-Sha -Path $P) -eq $archiveSha)
+# Observed, not asserted: whether the swap actually landed on $P (file identity
+# changed) and left the rollback backup. Greppable — if apply-swapped-binary
+# passes while these show unchanged, current_exe() != $P inside the guest.
+$idAfter = Get-FileId -Path $P
+"NOTE=apply-swap swapped-path=$swapped exit=$applyExit backup=$([bool](Test-Path $backup)) idBefore=$idBefore idAfter=$idAfter"
 if (Test-Path $applyLog) {
     foreach ($line in (Get-Content -LiteralPath $applyLog)) { "DIAG-applylog| $line" }
 }
