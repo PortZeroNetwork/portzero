@@ -101,6 +101,11 @@ pub enum StackCommand {
     /// not terminate any established proxied connections.
     UpdateHttpsPolicy(OverlayHttpsPolicy),
     Shutdown,
+    /// Test-only: report the number of sockets currently in the engine's
+    /// `SocketSet` (listeners + live connections). Used by the socket-reaping
+    /// regression test to prove finished connections are removed, not leaked.
+    #[cfg(test)]
+    DebugSocketCount(tokio::sync::oneshot::Sender<usize>),
 }
 
 /// Handle to the running virtual stack. Cloneable senders are used to talk to
@@ -238,6 +243,21 @@ impl VirtualStack {
 
     pub fn command_sender(&self) -> mpsc::Sender<StackCommand> {
         self.cmd_tx.clone()
+    }
+
+    /// Test-only: ask the engine how many sockets are in its `SocketSet`.
+    #[cfg(test)]
+    pub async fn debug_socket_count(&self) -> usize {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if self
+            .cmd_tx
+            .send(StackCommand::DebugSocketCount(tx))
+            .await
+            .is_err()
+        {
+            return 0;
+        }
+        rx.await.unwrap_or(0)
     }
 
     pub async fn shutdown(&self) -> Result<()> {

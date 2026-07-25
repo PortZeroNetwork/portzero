@@ -273,6 +273,10 @@ where
                             tracing::debug!("virtual stack shutting down");
                             break;
                         }
+                        #[cfg(test)]
+                        Some(StackCommand::DebugSocketCount(reply)) => {
+                            let _ = reply.send(self.sockets.iter().count());
+                        }
                     }
                 }
                 _ = ticker.tick() => {}
@@ -549,8 +553,30 @@ where
             self.handle_close(handle);
         }
 
-        // Remove finished connections.
-        self.connections.retain(|_, c| !c.is_finished());
+        // Reap connections whose proxy work is done. A finished connection is
+        // dropped only once its smoltcp socket has also reached `Closed` (its
+        // TCP close handshake completed, so `is_open()` is false), at which
+        // point we remove the socket from the `SocketSet` as well.
+        //
+        // Removing the socket is what actually frees its 64 KiB rx + 64 KiB tx
+        // buffers. The previous code dropped only the `Connection` bookkeeping
+        // and left every completed connection's smoltcp socket in the set
+        // forever — a ~128 KiB-per-connection leak that grew the daemon's RSS
+        // without bound over its lifetime and left thousands of dead sockets to
+        // be walked by `Interface::poll` on every 10 ms tick (wasted CPU too).
+        // See regression test `finished_connection_socket_is_reaped`.
+        let finished: Vec<SocketHandle> = self
+            .connections
+            .iter()
+            .filter(|(_, c)| c.is_finished())
+            .map(|(handle, _)| *handle)
+            .collect();
+        for handle in finished {
+            if !self.sockets.get::<tcp::Socket>(handle).is_open() {
+                self.connections.remove(&handle);
+                self.sockets.remove(handle);
+            }
+        }
     }
 
     fn drain_client_to_backend(&mut self, handle: SocketHandle) {

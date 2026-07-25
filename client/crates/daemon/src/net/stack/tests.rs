@@ -109,6 +109,80 @@ async fn vip_connect_proxies_to_backend() {
     stack.shutdown().await.unwrap();
 }
 
+/// A finished proxied connection must have its smoltcp socket removed from the
+/// engine's `SocketSet`, not just its `Connection` bookkeeping. Regression test
+/// for the ~128 KiB-per-connection leak: opening and cleanly closing many
+/// connections in sequence must return the engine's socket count to its
+/// listeners-only baseline, never accumulate one dead socket per connection.
+#[tokio::test]
+async fn finished_connection_socket_is_reaped() {
+    tracing_subscriber_try_init();
+
+    let backend = echo_backend().await;
+
+    let mut table = ServiceTable::new();
+    let svc = table.register("leaky".to_string(), backend, 5432, 0);
+    let vip = svc.vip;
+
+    let (stack_dev, mut client_dev) = MockDevice::pair();
+    let stack =
+        VirtualStack::spawn_with_device(stack_dev, table, None, OverlayHttpsPolicy::default());
+
+    // Baseline: one listener socket for the single service port, no connections.
+    let baseline = stack.debug_socket_count().await;
+    assert_eq!(baseline, 1, "expected exactly one listener socket at rest");
+
+    let client_ip = Ipv4Address::new(10, 254, 9, 9);
+    let mut client_iface = client_iface(&mut client_dev, client_ip);
+
+    for i in 0..4u16 {
+        let mut client_sockets = SocketSet::new(Vec::new());
+        let handle = client_sockets.add(new_tcp_socket());
+        {
+            let sock = client_sockets.get_mut::<tcp::Socket>(handle);
+            let cx = client_iface.context();
+            sock.connect(cx, (IpAddress::Ipv4(vip), 5432u16), (client_ip, 49000 + i))
+                .unwrap();
+        }
+
+        // Drive to established, then close the client side. The client FINs
+        // first, so the stack's socket completes its close via LAST-ACK and
+        // reaches `Closed` (no lingering TIME_WAIT to slow the test).
+        let mut closed = false;
+        for _ in 0..2000 {
+            client_iface.poll(Instant::now(), &mut client_dev, &mut client_sockets);
+            let sock = client_sockets.get_mut::<tcp::Socket>(handle);
+            if !closed && sock.may_send() {
+                sock.close();
+                closed = true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            // Stop once the client has closed and the stack has reaped the
+            // finished connection back to the listeners-only baseline.
+            if closed && stack.debug_socket_count().await == baseline {
+                break;
+            }
+        }
+        client_sockets.remove(handle);
+
+        // Give the stack task time to reap, then require it is back to baseline.
+        let mut count = stack.debug_socket_count().await;
+        for _ in 0..100 {
+            if count == baseline {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            count = stack.debug_socket_count().await;
+        }
+        assert_eq!(
+            count, baseline,
+            "connection {i} was not reaped from the SocketSet (socket leak)"
+        );
+    }
+
+    stack.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn same_service_port_routes_by_destination_vip() {
     tracing_subscriber_try_init();
@@ -350,6 +424,36 @@ async fn fixed_response_backend(response: &'static [u8]) -> std::net::SocketAddr
             tokio::spawn(async move {
                 let _ = sock.write_all(response).await;
                 let _ = sock.shutdown().await;
+            });
+        }
+    });
+    backend_addr
+}
+
+/// A backend that echoes whatever it receives and closes when the peer's write
+/// half closes. Used to drive a full open→use→close connection lifecycle.
+async fn echo_backend() -> std::net::SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backend_addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut sock, _) = match listener.accept().await {
+                Ok(p) => p,
+                Err(_) => break,
+            };
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                loop {
+                    match sock.read(&mut buf).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if sock.write_all(&buf[..n]).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
             });
         }
     });
