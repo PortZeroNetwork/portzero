@@ -27,6 +27,12 @@ use crate::export::{discovered_tunnels, TunnelUrl};
 /// larger with 413, so fail fast locally with a better message.
 const MAX_DIFF_BYTES: usize = 5_000_000;
 
+/// Review-records collection endpoint. Must not carry a trailing slash: the
+/// cloud API mounts this collection at `/review-records` exactly, and
+/// `/review-records/` is a different path there that matches no route and
+/// answers a bare 404.
+const REVIEW_RECORDS_PATH: &str = "/review-records";
+
 /// One commit on the branch under review, as sent to the cloud.
 #[derive(Debug, PartialEq, serde::Serialize)]
 struct ReviewCommit {
@@ -49,7 +55,7 @@ struct ThreadAdvanced {
     fix_commit: String,
 }
 
-/// Response from POST /review-records/.
+/// Response from POST /review-records.
 #[derive(Debug, Deserialize)]
 struct ReviewRecordResponse {
     id: String,
@@ -123,7 +129,7 @@ pub async fn run(
         "diff": diff,
     });
 
-    let resp = client.post("/review-records/", &body).await?;
+    let resp = client.post(REVIEW_RECORDS_PATH, &body).await?;
     let status = resp.status();
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
@@ -352,6 +358,15 @@ fn short_sha(sha: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn review_records_path_has_no_trailing_slash() {
+        // The cloud API mounts the collection at `/review-records` exactly;
+        // posting to `/review-records/` matches no route and returns a bare
+        // 404, which is how review uploads broke in production.
+        assert_eq!(REVIEW_RECORDS_PATH, "/review-records");
+        assert!(!REVIEW_RECORDS_PATH.ends_with('/'));
+    }
 
     #[test]
     fn parse_commit_log_parses_unit_separated_fields() {
