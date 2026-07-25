@@ -432,8 +432,8 @@ mod tests {
     #[test]
     fn dashboard_url_tracks_the_app_domain_for_the_production_api() {
         assert_eq!(
-            dashboard_url_from_api_url("https://app.portzero.cloud/api"),
-            "https://app.portzero.cloud",
+            dashboard_url_from_api_url("https://app.portzero.net/api"),
+            "https://app.portzero.net",
         );
     }
 

@@ -84,7 +84,7 @@ mod tests {
     fn default_api_url_points_at_the_dashboard_api() {
         assert_eq!(
             portzero_domain::endpoints::DEFAULT_API_URL,
-            "https://app.portzero.cloud/api"
+            "https://app.portzero.net/api"
         );
     }
 }

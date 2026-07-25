@@ -112,12 +112,19 @@ fn host_of(referer_or_origin: &str) -> Option<String> {
 }
 
 /// Is `host` a tunnel name (cloud or `.portzero.local` overlay)?
+///
+/// Matches only the `tunnel.` label itself, not the whole `.portzero.cloud`
+/// apex — `app.`/`api.`/`agent.`/`edge.portzero.cloud` are control-plane hosts
+/// (kept alive there for already-shipped clients; see
+/// docs/operators/runbooks/control-plane-domain-migration.md in
+/// portzero-cloud), not tunnels, and a bare `.portzero.cloud` suffix match
+/// would misclassify them.
 fn looks_like_tunnel(host: &str) -> bool {
     let h = host.to_ascii_lowercase();
     h.ends_with(".portzero.local")
         || h.ends_with(".local")
-        || h.ends_with("tunnel.portzero.cloud")
-        || h.ends_with(".portzero.cloud")
+        || h == "tunnel.portzero.cloud"
+        || h.ends_with(".tunnel.portzero.cloud")
 }
 
 struct Inner {
@@ -508,7 +515,19 @@ mod tests {
     fn test_looks_like_tunnel() {
         assert!(looks_like_tunnel("web.portzero.local"));
         assert!(looks_like_tunnel("api.alice.tunnel.portzero.cloud"));
+        assert!(looks_like_tunnel("tunnel.portzero.cloud"));
         assert!(!looks_like_tunnel("example.com"));
+    }
+
+    #[test]
+    fn looks_like_tunnel_excludes_control_plane_hosts() {
+        // app./api./agent./edge.portzero.cloud are control-plane vhosts kept
+        // alive for already-shipped clients, not tunnels — a bare
+        // `.portzero.cloud` suffix match would misclassify them.
+        assert!(!looks_like_tunnel("app.portzero.cloud"));
+        assert!(!looks_like_tunnel("api.portzero.cloud"));
+        assert!(!looks_like_tunnel("agent.portzero.cloud"));
+        assert!(!looks_like_tunnel("edge.portzero.cloud"));
     }
 
     #[test]
