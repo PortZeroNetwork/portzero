@@ -48,7 +48,10 @@ fn purge_targets(config: &DaemonConfig) -> Result<Vec<PurgeTarget>> {
         (config.issues_path(), "visibility issues state"),
         (config.auto_open_path(), "auto-open tracker state"),
         (config.cloud_state_path(), "cloud connection state"),
-        (config.cloud_route_status_path(), "cloud route review status"),
+        (
+            config.cloud_route_status_path(),
+            "cloud route review status",
+        ),
         (config.diagnostics_path(), "diagnostics report"),
         (config.pid_path(), "daemon PID file"),
     ];
