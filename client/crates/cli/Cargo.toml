@@ -1,6 +1,6 @@
 [package]
 name = "portzero-cli"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "Eliminate port conflicts in local dev by letting the OS pick random available ports, then forwarding them to virtual domains on a virtual NIC"

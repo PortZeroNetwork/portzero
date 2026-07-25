@@ -14,6 +14,9 @@
 //! The menu is built once in [`menu`] and used unchanged on every platform, so
 //! it stays identical across macOS, Windows, and Linux.
 
+use portzero_daemon::discovery_loop::DaemonConfig;
+use portzero_daemon::versions;
+
 pub mod actions;
 // The muda/tray-icon controller is Windows/macOS only; Linux drives ksni
 // directly from `platform::linux` and never compiles muda (which links GTK).
@@ -39,5 +42,13 @@ pub fn run() -> anyhow::Result<()> {
         );
         return Ok(());
     }
-    platform::run()
+
+    // Publish which build this tray is running, so the desktop app's Version
+    // panel and `portzero version` can see a tray left over from before an
+    // upgrade. Only the tray that won the singleton announces itself.
+    let config = DaemonConfig::load();
+    versions::announce(&config, versions::Component::Tray, versions::BUILD_VERSION);
+    let result = platform::run();
+    versions::withdraw(&config, versions::Component::Tray);
+    result
 }

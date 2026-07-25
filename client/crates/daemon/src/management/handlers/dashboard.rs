@@ -518,6 +518,10 @@ pub async fn status_json(State(state): State<AppState>) -> Json<serde_json::Valu
     let diagnostics_checks_run = diagnostics.as_ref().map(|r| r.checks_run);
 
     Json(serde_json::json!({
+        // The version of the daemon answering this request — not necessarily
+        // the version installed on disk, which is the whole point of reporting
+        // it (see `crate::versions`).
+        "version": crate::versions::BUILD_VERSION,
         "daemon_pid": daemon_pid,
         "overlay_active": overlay.overlay_active,
         "auth_authenticated": auth_authenticated,

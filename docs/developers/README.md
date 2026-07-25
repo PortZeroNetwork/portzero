@@ -9,6 +9,7 @@ Audience: [target-audience.md](target-audience.md).
 - [Complexity budgets](complexity-budgets.md)
 - [Software delivery lifecycle](sdlc.md) — staging, stable tags, workflows
 - [Release version numbers](release-version-numbers.md)
+- [Component versions](component-versions.md) — one workspace version, and the runtime check that the daemon/tray/app/CLI agree
 - [Unstable channel](unstable-channel.md) — auto Unstable Release on every staging push
 - [Release conventions](release-conventions.md) — shared with `portzero-cloud` (keep in sync)
 - [Windows signing](windows-signing.md)

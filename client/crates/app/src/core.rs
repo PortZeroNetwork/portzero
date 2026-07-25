@@ -20,11 +20,10 @@ use serde_json::{json, Value};
 /// Local overlay base URL the daemon serves its management UI + API on.
 pub const LOCAL_BASE: &str = "http://portzero.local";
 
-/// Environment override + base name for the daemon CLI binary, resolved with
-/// the same logic the tray uses so the two never disagree on how the daemon is
-/// driven.
-const CLI_BIN_ENV: &str = "PORTZERO_BIN";
-const CLI_BIN_NAME: &str = "portzero";
+/// The version this app was built from — the workspace version every PortZero
+/// binary shares, so it is directly comparable with what the daemon, tray, and
+/// CLI report.
+pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Build a blocking HTTP client scoped to the local daemon.
 ///
@@ -328,7 +327,7 @@ impl SseParser {
 /// drive the daemon identically. `--no-browser` is passed for lifecycle
 /// commands that would otherwise pop a browser, since the app is the GUI.
 fn run_cli(sub: &str) -> Result<(), String> {
-    let bin = portzero_domain::app::sibling_bin(CLI_BIN_ENV, CLI_BIN_NAME);
+    let bin = portzero_domain::app::cli_bin();
     let mut cmd = Command::new(&bin);
     cmd.arg(sub);
     if sub == "start" || sub == "restart" {
@@ -421,9 +420,61 @@ pub fn set_https(enabled: bool) -> Result<(), String> {
     })
 }
 
+/// Record that this app is running, so the CLI's version report can see it.
+pub fn announce_version() {
+    use portzero_daemon::discovery_loop::DaemonConfig;
+    use portzero_daemon::versions::{announce, Component};
+
+    announce(&DaemonConfig::load(), Component::App, BUILD_VERSION);
+}
+
+/// Remove this app's version record when it exits.
+pub fn withdraw_version() {
+    use portzero_daemon::discovery_loop::DaemonConfig;
+    use portzero_daemon::versions::{withdraw, Component};
+
+    withdraw(&DaemonConfig::load(), Component::App);
+}
+
+/// Every component's version plus whether they agree — the data behind the
+/// app's Version panel.
+///
+/// Serialized rather than returned as a typed struct because the whole app
+/// bridge speaks `serde_json::Value`; the shape is owned by
+/// [`portzero_daemon::versions::VersionReport`].
+pub fn get_versions() -> Value {
+    use portzero_daemon::discovery_loop::DaemonConfig;
+    use portzero_daemon::versions::{collect, Component};
+
+    let report = collect(&DaemonConfig::load(), Component::App, BUILD_VERSION);
+    serde_json::to_value(&report).unwrap_or_else(|e| {
+        json!({
+            "build_version": BUILD_VERSION,
+            "components": [],
+            "consistent": true,
+            "summary": format!("PortZero {BUILD_VERSION}. Could not read the other components' versions ({e})."),
+            "next_steps": [],
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_report_always_includes_this_app() {
+        let v = get_versions();
+        assert_eq!(v["build_version"], json!(BUILD_VERSION));
+        let app = v["components"]
+            .as_array()
+            .expect("components should be an array")
+            .iter()
+            .find(|c| c["component"] == json!("app"))
+            .expect("the app reports its own version");
+        assert_eq!(app["version"], json!(BUILD_VERSION));
+        assert_eq!(app["running"], json!(true));
+    }
 
     #[test]
     fn fallback_status_is_renderable_and_marks_daemon_down() {

@@ -32,6 +32,20 @@ stable bump. Once pushed, the tag itself is the release of record; the tag build
 reads its version straight from the tag name (`github.ref_name`) rather than
 recomputing anything.
 
+## Stamping the chosen version
+
+Both build workflows run `scripts/set-version.sh "$VERSION"` before compiling.
+It rewrites `[workspace.package] version` in the root `Cargo.toml` (which every
+crate inherits with `version.workspace = true`), the matching entries in
+`Cargo.lock`, and the Tauri bundle version in
+`client/crates/app/tauri.conf.json`.
+
+That single stamp is what makes the runtime check in
+[Component versions](component-versions.md) meaningful: `portzero`, the daemon,
+`portzero-tray`, and `portzero-app` from one build always report the same
+version, so a disagreement at runtime can only mean a stale process. Do not give
+a crate its own literal version.
+
 ## Unstable builds
 
 An unstable-channel `workflow_dispatch` run of the same workflow (Actions →

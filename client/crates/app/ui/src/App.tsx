@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { getStatus } from "./api";
-import type { Status } from "./types";
+import { getStatus, getVersions } from "./api";
+import type { Status, VersionReport } from "./types";
 import DaemonControls from "./components/DaemonControls";
 import Settings from "./components/Settings";
 import Tunnels from "./components/Tunnels";
 import Issues from "./components/Issues";
 import NextSteps from "./components/NextSteps";
+import Versions from "./components/Versions";
 import mark from "./assets/portzero-mark.jpg";
 
 const POLL_MS = 4000;
@@ -51,6 +52,7 @@ function health(status: Status | null): Health {
 
 export default function App() {
   const [status, setStatus] = useState<Status | null>(null);
+  const [versions, setVersions] = useState<VersionReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const timer = useRef<number | null>(null);
 
@@ -63,19 +65,39 @@ export default function App() {
     }
   }, []);
 
+  // Versions are deliberately NOT on the status poll: collecting them runs the
+  // installed CLI binary, which is far too heavy to repeat every few seconds.
+  // Refreshing on mount, on window focus, and whenever the daemon starts or
+  // stops covers every moment a version can actually change.
+  const refreshVersions = useCallback(async () => {
+    try {
+      setVersions(await getVersions());
+    } catch (e) {
+      setError(String(e));
+    }
+  }, []);
+
   useEffect(() => {
     window.scrollTo(0, 0);
     refresh();
+    refreshVersions();
     timer.current = window.setInterval(refresh, POLL_MS);
     const unlistenP = listen("app://focus", () => {
       window.scrollTo(0, 0);
       refresh();
+      refreshVersions();
     });
     return () => {
       if (timer.current) window.clearInterval(timer.current);
       unlistenP.then((u) => u());
     };
-  }, [refresh]);
+  }, [refresh, refreshVersions]);
+
+  // A daemon that just started (or stopped) reports a different version — or
+  // none at all — so re-read the report when its lifecycle state changes.
+  useEffect(() => {
+    if (status) refreshVersions();
+  }, [status?.running, status?.daemon_pid, refreshVersions]);
 
   const h = health(status);
   const pid = status?.daemon_pid;
@@ -89,6 +111,15 @@ export default function App() {
             <span>PortZero</span>
           </span>
           <span className="nav-status">
+            {versions && (
+              <>
+                <span className={versions.consistent ? "" : "version-warn"}>
+                  v{versions.build_version}
+                  {versions.consistent ? "" : " · versions differ"}
+                </span>
+                {status && " · "}
+              </>
+            )}
             {status
               ? status.running
                 ? pid
@@ -136,6 +167,7 @@ export default function App() {
             </section>
 
             <Issues status={status} />
+            <Versions report={versions} onRecheck={refreshVersions} />
           </>
         )}
       </main>

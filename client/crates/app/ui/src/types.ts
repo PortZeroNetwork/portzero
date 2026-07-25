@@ -125,6 +125,34 @@ export interface Status {
   status_message?: string;
 }
 
+// Mirrors portzero_daemon::versions::{ComponentVersion, VersionReport}, which
+// the app exposes through the `get_versions` command.
+
+export type ComponentId = "app" | "tray" | "daemon" | "cli";
+
+export type VersionSource = "running" | "installed" | "unknown";
+
+export interface ComponentVersion {
+  component: ComponentId;
+  label: string;
+  /** null when the component's version could not be determined. */
+  version: string | null;
+  running: boolean;
+  pid: number | null;
+  source: VersionSource;
+  /** Where the version came from, or why it is missing. */
+  detail: string;
+}
+
+export interface VersionReport {
+  build_version: string;
+  components: ComponentVersion[];
+  consistent: boolean;
+  summary: string;
+  /** How to fix a mismatch; empty when everything agrees. */
+  next_steps: string[];
+}
+
 /** One line delivered over the `example://log` event. */
 export interface ExampleLog {
   id: string;

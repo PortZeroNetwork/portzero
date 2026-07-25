@@ -141,3 +141,11 @@ pub fn set_https(enabled: bool) -> Result<(), String> {
 pub fn open_external(url: String) -> Result<(), String> {
     core::open_external(&url)
 }
+
+/// This app's version, every other component's version, and whether they agree.
+/// Never errors — a component whose version can't be read is reported as
+/// unknown rather than failing the whole panel.
+#[tauri::command]
+pub fn get_versions() -> Value {
+    core::get_versions()
+}

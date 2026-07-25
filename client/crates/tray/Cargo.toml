@@ -1,6 +1,6 @@
 [package]
 name = "portzero-tray"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "System-tray companion for the PortZero local tunnel daemon: shows daemon health, surfaces issues, and offers one-click start/restart/stop and HTTPS control."

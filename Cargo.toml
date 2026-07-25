@@ -10,3 +10,13 @@ members = [
     "client/crates/xtask",
     "proto",
 ]
+
+# One version for the whole product. Every crate inherits it with
+# `version.workspace = true`, and `scripts/set-version.sh` rewrites it (plus
+# Cargo.lock and the Tauri bundle version) at release time — so `portzero`, the
+# daemon it runs, `portzero-tray`, and `portzero-app` from one build always
+# report the same version. The desktop app's Version panel, `portzero version`,
+# and `portzero doctor` compare those reports at runtime; that comparison is
+# only meaningful because the version has exactly one source, here.
+[workspace.package]
+version = "0.1.0"

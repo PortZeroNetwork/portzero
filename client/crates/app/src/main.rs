@@ -18,6 +18,22 @@ mod core;
 use tauri::{Emitter, Manager};
 
 fn main() {
+    // `--version` before any window work: it must answer and exit, so support
+    // can ask for it even while the app is running (the single-instance guard
+    // below would otherwise just focus the existing window).
+    if std::env::args()
+        .skip(1)
+        .any(|a| a == "--version" || a == "-V")
+    {
+        println!("portzero-app {}", core::BUILD_VERSION);
+        return;
+    }
+
+    // Publish which build this app is running, so `portzero version` and
+    // `portzero doctor` can see it the same way the app sees the daemon and
+    // tray. Withdrawn when the event loop returns.
+    core::announce_version();
+
     tauri::Builder::default()
         // Single-instance must be registered first: a second launch (e.g. the
         // tray or CLI opening the app again) is routed to the already-running
@@ -42,7 +58,10 @@ fn main() {
             commands::restart_daemon,
             commands::set_https,
             commands::open_external,
+            commands::get_versions,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the PortZero desktop app");
+
+    core::withdraw_version();
 }

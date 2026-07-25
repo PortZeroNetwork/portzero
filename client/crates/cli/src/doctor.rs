@@ -156,12 +156,41 @@ pub async fn run() -> Result<()> {
     // 9. Cloud tunnel state (informational when logged out).
     checks.push(check_cloud(&config).await);
 
+    // 10. Every running component built from the same release.
+    checks.push(check_component_versions());
+
     print_report(&checks);
 
     if checks.iter().any(|c| c.status == Status::Fail) {
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// Do the running components agree on their version?
+///
+/// A mismatch means an upgrade replaced the binaries while an older daemon,
+/// tray, or app kept running — the components then speak different protocol and
+/// state-file versions to each other, which shows up later as confusing,
+/// unrelated-looking failures. It is a warning rather than a failure because
+/// nothing is broken *yet*.
+fn check_component_versions() -> Check {
+    let report = crate::version::collect();
+    if report.consistent {
+        return Check::pass("component versions", report.summary);
+    }
+    Check::warn(
+        "component versions",
+        report.summary,
+        format!(
+            "{} (run `portzero version` for the full breakdown)",
+            report
+                .next_steps
+                .first()
+                .map(String::as_str)
+                .unwrap_or("restart the PortZero daemon, tray, and app")
+        ),
+    )
 }
 
 /// Is the daemon process running? Report its PID and (best-effort) uptime.

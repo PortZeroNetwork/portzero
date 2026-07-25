@@ -189,7 +189,19 @@ pub async fn run_discovery_loop(config: &DaemonConfig) -> Result<()> {
     let mut config = config.clone();
 
     let pid = std::process::id();
-    tracing::info!("Discovery daemon started (PID {})", pid);
+    tracing::info!(
+        "Discovery daemon started (PID {}, version {})",
+        pid,
+        crate::versions::BUILD_VERSION
+    );
+    // Publish which build this daemon is running so the desktop app,
+    // `portzero version`, and `portzero doctor` can spot a daemon left over
+    // from before an upgrade. Withdrawn again on clean shutdown below.
+    crate::versions::announce(
+        &config,
+        crate::versions::Component::Daemon,
+        crate::versions::BUILD_VERSION,
+    );
     tracing::info!(
         "Scanning every {}s, routes at {}",
         config.scan_interval_secs,
@@ -581,6 +593,7 @@ pub async fn run_discovery_loop(config: &DaemonConfig) -> Result<()> {
     observations.flush();
 
     remove_pid_file(&config);
+    crate::versions::withdraw(&config, crate::versions::Component::Daemon);
     tracing::info!("Discovery daemon stopped");
 
     Ok(())

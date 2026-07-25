@@ -40,6 +40,7 @@ mod setup;
 mod skill;
 mod trust;
 mod update;
+mod version;
 mod wait;
 
 #[derive(Parser)]
@@ -131,6 +132,14 @@ enum Command {
     /// Run privileged first-run setup after package installation.
     #[command(alias = "post-install")]
     Setup,
+
+    /// Show the version of every PortZero component and whether they agree.
+    ///
+    /// `portzero --version` speaks only for this binary. The daemon, tray, and
+    /// desktop app are separate processes that keep running the build they
+    /// started with, so after an upgrade they can lag behind — this command
+    /// asks each of them and says whether the install is coherent.
+    Version,
 
     /// Update portzero to the latest release, replacing this binary in place.
     ///
@@ -380,6 +389,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Inspect => inspect::inspect()?,
         Command::Mcp => mcp::serve()?,
         Command::Setup => setup::run().await?,
+        Command::Version => version::run()?,
         Command::Update { check, force } => selfupdate::run(check, force).await?,
 
         Command::Login {

@@ -554,3 +554,18 @@ td {
   gap: 14px;
   flex-wrap: wrap;
 }
+
+/* Version panel */
+.version-warn {
+  color: var(--warn);
+  font-weight: 600;
+}
+.version-mismatch {
+  margin-top: 14px;
+}
+.version-mismatch .diag-fix {
+  margin-top: 4px;
+}
+.version-actions {
+  margin-top: 14px;
+}

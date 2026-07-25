@@ -3,10 +3,14 @@
 // command in client/crates/app/src/commands.rs.
 
 import { invoke } from "@tauri-apps/api/core";
-import type { Status } from "./types";
+import type { Status, VersionReport } from "./types";
 
 export function getStatus(): Promise<Status> {
   return invoke<Status>("get_status");
+}
+
+export function getVersions(): Promise<VersionReport> {
+  return invoke<VersionReport>("get_versions");
 }
 
 export function examplesStatus(): Promise<unknown> {

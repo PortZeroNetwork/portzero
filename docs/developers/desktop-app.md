@@ -33,6 +33,12 @@ entirely while also just being a nicer way to use the tool than a browser tab.
 
   There is no daemon logic duplicated into the app: it is a UI over the
   existing management API and CLI, not a second implementation.
+- **Version panel.** The app shows its own version in the title bar and, in the
+  **Version** section, the version of every other PortZero component with a
+  warning (and remediation steps) when they disagree — the case being an
+  upgrade that replaced the binaries while an older daemon or tray kept
+  running. The app records its own version on startup so the CLI can see it
+  too. See [Component versions](component-versions.md).
 - **Single-instance.** The app uses Tauri's single-instance plugin, so
   launching it again (from the tray, from `portzero start`, or by
   double-clicking it) focuses the existing window instead of opening a
@@ -100,6 +106,8 @@ new links to it from user-facing surfaces; point at the app instead.
 ## Related docs
 
 - [Development](development.md) — `just`, tests, git hooks.
+- [Component versions](component-versions.md) — how the Version panel gets its
+  data, and why every crate shares one version.
 - [Release conventions](release-conventions.md) /
   [Software delivery lifecycle](sdlc.md) — how Unstable/Stable builds are cut.
 - [Windows signing](windows-signing.md) — code-signing runbook.

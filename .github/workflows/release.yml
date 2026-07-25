@@ -205,8 +205,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Set CLI package version
-        run: scripts/set-cli-version.sh "${{ needs.version.outputs.version }}"
+      - name: Stamp the release version across every crate
+        run: scripts/set-version.sh "${{ needs.version.outputs.version }}"
         shell: bash
 
       - uses: dtolnay/rust-toolchain@stable
@@ -652,8 +652,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Set CLI package version
-        run: scripts/set-cli-version.sh "${{ needs.version.outputs.version }}"
+      - name: Stamp the release version across every crate
+        run: scripts/set-version.sh "${{ needs.version.outputs.version }}"
         shell: bash
 
       - name: Download amd64 Linux artifact

@@ -25,6 +25,19 @@ pub const APP_BIN_ENV: &str = "PORTZERO_APP_BIN";
 /// Base (extension-less) name of the desktop app binary.
 pub const APP_BIN_NAME: &str = "portzero-app";
 
+/// Environment override for the `portzero` CLI binary path.
+pub const CLI_BIN_ENV: &str = "PORTZERO_BIN";
+
+/// Base (extension-less) name of the CLI binary. This is also the binary the
+/// daemon runs in (`portzero start --foreground`).
+pub const CLI_BIN_NAME: &str = "portzero";
+
+/// Environment override for the tray binary path.
+pub const TRAY_BIN_ENV: &str = "PORTZERO_TRAY_BIN";
+
+/// Base (extension-less) name of the tray binary.
+pub const TRAY_BIN_NAME: &str = "portzero-tray";
+
 /// Platform-specific executable file name for a base binary name.
 fn exe_file_name(base: &str) -> String {
     #[cfg(windows)]
@@ -65,6 +78,20 @@ pub fn sibling_bin(env_override: &str, base: &str) -> PathBuf {
 /// See the module docs for the resolution order.
 pub fn app_bin() -> PathBuf {
     sibling_bin(APP_BIN_ENV, APP_BIN_NAME)
+}
+
+/// Resolve the `portzero` CLI binary path, with the same resolution order as
+/// [`app_bin`]. Every caller that shells out to the CLI (the app's daemon
+/// controls, the version report) resolves it here so they can never disagree
+/// about which `portzero` they mean.
+pub fn cli_bin() -> PathBuf {
+    sibling_bin(CLI_BIN_ENV, CLI_BIN_NAME)
+}
+
+/// Resolve the `portzero-tray` binary path, with the same resolution order as
+/// [`app_bin`].
+pub fn tray_bin() -> PathBuf {
+    sibling_bin(TRAY_BIN_ENV, TRAY_BIN_NAME)
 }
 
 /// Launch the PortZero desktop app, detached and non-blocking (best-effort).

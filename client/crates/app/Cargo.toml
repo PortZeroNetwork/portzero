@@ -1,6 +1,6 @@
 [package]
 name = "portzero-app"
-version = "0.0.1"
+version.workspace = true
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "PortZero desktop app: the local management GUI (Tauri v2) that replaces the browser-based local dashboard."

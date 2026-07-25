@@ -7,6 +7,7 @@
 //! whose clicks arrive as ids over a channel) and the [`Action`] it triggers
 //! (used directly by the ksni backend, whose clicks arrive as closures).
 
+use portzero_daemon::versions;
 use portzero_domain::endpoints;
 
 use crate::state::{Health, Snapshot};
@@ -178,6 +179,16 @@ pub fn build(snapshot: &Snapshot) -> MenuSpec {
     // App controls.
     nodes.push(action(ID_REFRESH, "Refresh Now", Action::Refresh));
     nodes.push(action(ID_QUIT, "Quit PortZero Tray", Action::Quit));
+
+    // The running tray's own version, so "which version am I on?" is answerable
+    // without opening anything. Whether every component agrees on it is shown in
+    // the desktop app's Version panel (and `portzero version`), which can see
+    // all of them; the tray only speaks for itself.
+    nodes.push(Node::Separator);
+    nodes.push(Node::Label(format!(
+        "PortZero v{}",
+        versions::BUILD_VERSION
+    )));
 
     MenuSpec { nodes }
 }
