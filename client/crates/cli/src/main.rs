@@ -16,6 +16,68 @@ pub(crate) fn home_env_lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Test-only redirect for [`client_home`], set by [`with_temp_home`].
+#[cfg(test)]
+static HOME_OVERRIDE: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
+/// The home directory every `~/.portzero` path in this crate is resolved
+/// against.
+///
+/// In test builds an override set by [`with_temp_home`] wins. That indirection
+/// exists because `dirs::home_dir()` **cannot be redirected on Windows**: it
+/// calls `SHGetKnownFolderPath(FOLDERID_Profile)` and ignores both `HOME` and
+/// `USERPROFILE`. Tests that pointed `HOME` at a temp dir therefore read and
+/// wrote the runner's real profile on Windows — so they clobbered each other
+/// (a store written by one test made another's "no store yet" assertion fail)
+/// and scribbled into the developer's actual `~/.portzero`.
+pub(crate) fn client_home() -> Option<std::path::PathBuf> {
+    #[cfg(test)]
+    {
+        let override_dir = HOME_OVERRIDE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if override_dir.is_some() {
+            return override_dir;
+        }
+    }
+    dirs::home_dir()
+}
+
+/// Run `f` with [`client_home`] pointed at a fresh temp dir, holding
+/// [`home_env_lock`] for the duration and restoring the previous state after.
+///
+/// `HOME` is set too, for the code that reads it directly rather than going
+/// through `client_home` (`~/.claude` transcript discovery, for one).
+#[cfg(test)]
+pub(crate) fn with_temp_home<T>(label: &str, f: impl FnOnce(&std::path::Path) -> T) -> T {
+    let _guard = home_env_lock();
+    let dir = std::env::temp_dir().join(format!(
+        "pz-{}-test-{}-{}",
+        label,
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let prev_home = std::env::var("HOME").ok();
+    std::env::set_var("HOME", &dir);
+    *HOME_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()) = Some(dir.clone());
+
+    let out = f(&dir);
+
+    *HOME_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    match prev_home {
+        Some(v) => std::env::set_var("HOME", v),
+        None => std::env::remove_var("HOME"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    out
+}
+
 mod agents;
 mod api_client;
 mod auth;

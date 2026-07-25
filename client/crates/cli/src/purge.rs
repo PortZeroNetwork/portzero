@@ -143,29 +143,11 @@ pub fn run() -> Result<()> {
 mod tests {
     use super::*;
 
-    /// Run `f` with `HOME` pointed at a fresh temp dir, restoring it after.
-    /// Shares the process-global HOME lock so it serializes with every other
-    /// HOME-mutating test in this binary.
+    /// Run `f` with the home directory pointed at a fresh temp dir. Shares the
+    /// process-global HOME lock so it serializes with every other
+    /// home-mutating test in this binary.
     fn with_temp_home<T>(f: impl FnOnce(&std::path::Path) -> T) -> T {
-        let _guard = crate::home_env_lock();
-        let dir = std::env::temp_dir().join(format!(
-            "pz-purge-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let prev = std::env::var("HOME").ok();
-        std::env::set_var("HOME", &dir);
-        let out = f(&dir);
-        match prev {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-        out
+        crate::with_temp_home("purge", f)
     }
 
     fn touch(path: &std::path::Path) {
@@ -178,9 +160,12 @@ mod tests {
         with_temp_home(|_| {
             let config = DaemonConfig::default();
             let targets = purge_targets(&config).unwrap();
+            // Compare with `/` separators on every platform: the needles below
+            // spell nested paths (`cost/store.json`), and Windows renders those
+            // with `\`, which would never match.
             let paths: Vec<String> = targets
                 .iter()
-                .map(|t| t.path.display().to_string())
+                .map(|t| t.path.display().to_string().replace('\\', "/"))
                 .collect();
 
             for needle in [

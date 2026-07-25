@@ -24,10 +24,14 @@ pub struct AuthConfig {
 impl AuthConfig {
     /// Path to the auth config file.
     pub fn path() -> Result<PathBuf> {
-        let home = dirs::home_dir().ok_or_else(|| {
+        let home = crate::client_home().ok_or_else(|| {
             anyhow::anyhow!(
-                "Could not determine home directory.\n\n\
-                 Set the HOME environment variable and try again."
+                "Could not determine your home directory, so PortZero cannot locate \
+                 your credentials (~/.portzero/auth.json).\n\n\
+                 On Linux and macOS, set the HOME environment variable and try again. \
+                 On Windows this means the user profile folder could not be resolved, \
+                 which usually indicates a damaged profile or a service account with \
+                 no profile loaded."
             )
         })?;
         Ok(home.join(".portzero").join("auth.json"))

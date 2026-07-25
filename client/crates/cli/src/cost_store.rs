@@ -52,10 +52,14 @@ pub struct CostStore {
 
 /// Directory holding the local cost store (`~/.portzero/cost/`).
 pub fn store_dir() -> Result<PathBuf> {
-    let home = dirs::home_dir().ok_or_else(|| {
+    let home = crate::client_home().ok_or_else(|| {
         anyhow::anyhow!(
-            "Could not determine your home directory.\n\n\
-             Set the HOME environment variable and try again."
+            "Could not determine your home directory, so PortZero cannot locate \
+             its cost store (~/.portzero/cost/store.json).\n\n\
+             On Linux and macOS, set the HOME environment variable and try again. \
+             On Windows this means the user profile folder could not be resolved, \
+             which usually indicates a damaged profile or a service account with \
+             no profile loaded."
         )
     })?;
     Ok(home.join(".portzero").join("cost"))
@@ -149,25 +153,7 @@ mod tests {
     use super::*;
 
     fn with_temp_home<T>(f: impl FnOnce() -> T) -> T {
-        let _guard = crate::home_env_lock();
-        let dir = std::env::temp_dir().join(format!(
-            "pz-cost-store-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let prev = std::env::var("HOME").ok();
-        std::env::set_var("HOME", &dir);
-        let out = f();
-        match prev {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-        out
+        crate::with_temp_home("cost-store", |_| f())
     }
 
     fn sample_commit(sha: &str, session: &str, cost: f64) -> StoredCommitCost {

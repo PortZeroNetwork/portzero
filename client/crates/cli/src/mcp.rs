@@ -848,29 +848,13 @@ mod tests {
 
     #[test]
     fn test_list_feedback_requires_login() {
-        let _guard = crate::home_env_lock();
-        // Point HOME at an empty temp dir so no ~/.portzero/auth.json exists;
-        // the tool must fail with the not-logged-in message before any HTTP.
-        let dir = std::env::temp_dir().join(format!(
-            "portzero-mcp-test-home-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let prev_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", &dir);
-
-        let params = json!({ "name": "list_feedback", "arguments": {} });
-        let result = handle_method("tools/call", Some(&params)).unwrap();
-
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-        let _ = std::fs::remove_dir_all(&dir);
+        // Point the home dir at an empty temp dir so no ~/.portzero/auth.json
+        // exists; the tool must fail with the not-logged-in message before any
+        // HTTP.
+        let result = crate::with_temp_home("mcp", |_| {
+            let params = json!({ "name": "list_feedback", "arguments": {} });
+            handle_method("tools/call", Some(&params)).unwrap()
+        });
 
         assert_eq!(result["isError"], true);
         let text = result["content"][0]["text"].as_str().unwrap();

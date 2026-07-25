@@ -661,36 +661,26 @@ mod tests {
 
     #[test]
     fn store_write_holds_metadata_only_no_content_leak() {
-        let _guard = crate::home_env_lock();
-        let dir = std::env::temp_dir().join(format!("pz-costhook-{}", now_stamp()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let prev = std::env::var("HOME").ok();
-        std::env::set_var("HOME", &dir);
+        crate::with_temp_home("costhook", |_| {
+            let usage = parse_usage_from_str(&fixture_transcript());
+            let priced = price_session(&usage);
+            let commits = vec![CommitAttribution {
+                sha: "a".repeat(40),
+                cost_usd: priced.cost_usd,
+                confidence: "high",
+            }];
+            write_store("acme/widget", "s-1", &usage, &priced, &commits).unwrap();
 
-        let usage = parse_usage_from_str(&fixture_transcript());
-        let priced = price_session(&usage);
-        let commits = vec![CommitAttribution {
-            sha: "a".repeat(40),
-            cost_usd: priced.cost_usd,
-            confidence: "high",
-        }];
-        write_store("acme/widget", "s-1", &usage, &priced, &commits).unwrap();
+            // The persisted store must contain the cost but never the sentinel.
+            let raw = std::fs::read_to_string(crate::cost_store::store_path().unwrap()).unwrap();
+            assert!(!raw.contains(SENTINEL), "content leaked into store: {raw}");
+            assert!(raw.contains("claude-opus-4-8"));
+            assert!(raw.contains("acme/widget"));
 
-        // The persisted store must contain the cost but never the sentinel.
-        let raw = std::fs::read_to_string(crate::cost_store::store_path().unwrap()).unwrap();
-        assert!(!raw.contains(SENTINEL), "content leaked into store: {raw}");
-        assert!(raw.contains("claude-opus-4-8"));
-        assert!(raw.contains("acme/widget"));
-
-        let reloaded = CostStore::load().unwrap();
-        assert_eq!(reloaded.sessions.len(), 1);
-        assert_eq!(reloaded.commits.len(), 1);
-
-        match prev {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-        let _ = std::fs::remove_dir_all(&dir);
+            let reloaded = CostStore::load().unwrap();
+            assert_eq!(reloaded.sessions.len(), 1);
+            assert_eq!(reloaded.commits.len(), 1);
+        });
     }
 
     #[test]
