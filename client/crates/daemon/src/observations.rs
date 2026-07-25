@@ -147,6 +147,22 @@ impl std::fmt::Debug for ObservationStore {
 /// requests does not thrash the disk.
 const FLUSH_INTERVAL: Duration = Duration::from_secs(2);
 
+/// Upper bound on distinct exercised routes kept in memory (and on disk). The
+/// route key includes the request path, which is unbounded in cardinality for a
+/// real app (`/users/1`, `/users/2`, …, 404 probes, bot scans), so without a
+/// cap the map — and `observations.json` — would grow without bound over a
+/// long-lived daemon. When exceeded we evict the least-recently-seen routes.
+const MAX_ROUTES: usize = 5_000;
+
+/// Upper bound on distinct observed edges. Edge cardinality is naturally low
+/// (one entry per tunnel→tunnel pair), but bound it too so a flood of spoofed
+/// `Referer`/`Origin` hosts can never grow the map without limit.
+const MAX_EDGES: usize = 2_000;
+
+/// Upper bound on distinct `X-PZ-Test` attributions kept per route, so a route
+/// hit under many different test ids cannot grow a single entry without bound.
+const MAX_TESTS_PER_ROUTE: usize = 32;
+
 impl ObservationStore {
     /// Create a store that persists to `<state_dir>/observations.json`, seeded
     /// from any snapshot already on disk.
@@ -163,12 +179,17 @@ impl ObservationStore {
             routes.insert((r.domain.clone(), r.method.clone(), r.path.clone()), r);
         }
 
+        // Bound whatever was loaded from disk: an `observations.json` written by
+        // an older (unbounded) daemon could already be arbitrarily large.
+        let mut inner = Inner {
+            edges,
+            routes,
+            last_flush: None,
+        };
+        inner.enforce_caps();
+
         Self {
-            inner: Mutex::new(Inner {
-                edges,
-                routes,
-                last_flush: None,
-            }),
+            inner: Mutex::new(inner),
             path,
         }
     }
@@ -214,7 +235,8 @@ impl ObservationStore {
             entry.count += 1;
             entry.last_seen = now;
             if let Some(test) = x_pz_test.map(str::trim).filter(|t| !t.is_empty()) {
-                if !entry.tests.iter().any(|t| t == test) {
+                if entry.tests.len() < MAX_TESTS_PER_ROUTE && !entry.tests.iter().any(|t| t == test)
+                {
                     entry.tests.push(test.to_string());
                 }
             }
@@ -229,6 +251,7 @@ impl ObservationStore {
             record_edge(&mut guard, from, &to_domain, "http", now);
         }
 
+        guard.enforce_caps();
         self.maybe_flush(guard);
     }
 
@@ -251,6 +274,7 @@ impl ObservationStore {
             return;
         };
         record_edge(&mut guard, from, &to_domain, protocol, Utc::now());
+        guard.enforce_caps();
         self.maybe_flush(guard);
     }
 
@@ -307,6 +331,40 @@ fn record_edge(
     });
     entry.request_count += 1;
     entry.last_seen = now;
+}
+
+impl Inner {
+    /// Enforce the in-memory caps, evicting least-recently-seen entries so the
+    /// maps (and the persisted snapshot) can never grow without bound. Called
+    /// after every record and once when seeding from disk.
+    fn enforce_caps(&mut self) {
+        evict_to_cap(&mut self.routes, MAX_ROUTES, |r| r.last_seen);
+        evict_to_cap(&mut self.edges, MAX_EDGES, |e| e.last_seen);
+    }
+}
+
+/// Evict the least-recently-seen entries from `map` until it is back under
+/// `cap`. To avoid an O(n) scan on every single over-cap insert, this drops in
+/// a batch down to ~90% of `cap`, so a saturated map amortizes one sort per
+/// ~10% of `cap` new keys rather than one per insert. Ties on `last_seen` are
+/// broken by key, so eviction is deterministic and always makes progress even
+/// when many entries share a coarse-clock timestamp.
+fn evict_to_cap<K, V>(map: &mut BTreeMap<K, V>, cap: usize, last_seen: impl Fn(&V) -> DateTime<Utc>)
+where
+    K: Ord + Clone,
+{
+    let len = map.len();
+    if len <= cap {
+        return;
+    }
+    let target = cap - cap / 10;
+    let remove = len - target;
+    let mut by_age: Vec<(DateTime<Utc>, K)> =
+        map.iter().map(|(k, v)| (last_seen(v), k.clone())).collect();
+    by_age.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    for (_, key) in by_age.into_iter().take(remove) {
+        map.remove(&key);
+    }
 }
 
 fn snapshot(inner: &Inner) -> Observations {
@@ -595,6 +653,94 @@ mod tests {
             None,
         );
         assert_eq!(store.snapshot().edges.len(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_evict_to_cap_drops_least_recently_seen() {
+        use chrono::TimeZone;
+        let mut map: BTreeMap<u32, ExercisedRoute> = BTreeMap::new();
+        // 100 entries with strictly increasing last_seen (key n is the n-th oldest).
+        for n in 0..100u32 {
+            map.insert(
+                n,
+                ExercisedRoute {
+                    domain: "d".into(),
+                    method: "GET".into(),
+                    path: format!("/{n}"),
+                    count: 1,
+                    tests: Vec::new(),
+                    last_seen: Utc.timestamp_opt(1_000 + n as i64, 0).unwrap(),
+                },
+            );
+        }
+        // Cap of 50 → batch-evicts down to 90% of cap (45), removing the 55 oldest.
+        evict_to_cap(&mut map, 50, |r| r.last_seen);
+        assert_eq!(map.len(), 45);
+        // The survivors are the newest keys (55..=99); the oldest are gone.
+        assert!(map.keys().min().copied().unwrap() >= 55);
+        assert!(map.contains_key(&99));
+        assert!(!map.contains_key(&0));
+    }
+
+    #[test]
+    fn test_evict_to_cap_is_noop_under_cap() {
+        let mut map: BTreeMap<u32, ObservedEdge> = BTreeMap::new();
+        map.insert(
+            1,
+            ObservedEdge {
+                from: None,
+                to: "db".into(),
+                protocol: "tcp".into(),
+                request_count: 1,
+                last_seen: Utc::now(),
+            },
+        );
+        evict_to_cap(&mut map, 10, |e| e.last_seen);
+        assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn test_record_http_bounds_route_map() {
+        let dir = std::env::temp_dir().join(format!("pz-obs-cap-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let store = ObservationStore::new(&dir);
+
+        // Far more distinct paths than the cap — the map must never exceed it.
+        for n in 0..(MAX_ROUTES + 500) {
+            store.record_http(
+                "api.portzero.local",
+                "GET",
+                &format!("/item/{n}"),
+                None,
+                None,
+            );
+        }
+        assert!(store.snapshot().routes.len() <= MAX_ROUTES);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_record_http_bounds_tests_per_route() {
+        let dir = std::env::temp_dir().join(format!("pz-obs-tests-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let store = ObservationStore::new(&dir);
+
+        // One route hit under many distinct test ids — the `tests` vec is capped.
+        for n in 0..(MAX_TESTS_PER_ROUTE + 20) {
+            store.record_http(
+                "api.portzero.local",
+                "GET",
+                "/",
+                None,
+                Some(&format!("test-{n}")),
+            );
+        }
+        let snap = store.snapshot();
+        assert_eq!(snap.routes.len(), 1);
+        assert_eq!(snap.routes[0].tests.len(), MAX_TESTS_PER_ROUTE);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
