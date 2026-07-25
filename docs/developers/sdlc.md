@@ -13,8 +13,12 @@ This repository uses a Heroku-style, tag-addressed release model (the same one
   and the tag push builds and publishes the signed release. (Naming: see
   [docs/developers/release-conventions.md](release-conventions.md) — the same workflow
   name, inputs, and gate as `portzero-cloud`.)
-- GitHub Actions CI runs on PRs into `staging` (see
-  `.github/workflows/ci.yml`).
+- GitHub Actions CI runs on PRs into `staging` and on pushes to `staging`
+  itself (see `.github/workflows/ci.yml`). The `staging` run is the quick set —
+  `Check & Test` (fmt, clippy, tests, OpenAPI spec) and `File-size budget`. The
+  slow jobs (`Lifecycle upgrade`, `E2E real TUN overlay`) stay PR-only, because
+  on `staging` that ground is already covered by `vm-e2e.yml` and
+  `playwright-tls-verify.yml`.
 
 ## Local validation before release
 

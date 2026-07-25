@@ -17,7 +17,8 @@ binary (invoked via `just complexity`) and runs:
   `wc -l` calls) and matches the pattern already used by the `fmt` pre-commit
   hook.
 - **In CI** (`.github/workflows/ci.yml`, `file-size-budget` job): the full
-  check over every `client/*.rs` file, on every PR into `staging`. This is
+  check over every `client/*.rs` file, on every PR into `staging` and on
+  every push to `staging`. This is
   a required job, so the budget can't be bypassed with `git commit
   --no-verify` / `git push --no-verify` — those only skip the local
   lefthook hooks, not CI.

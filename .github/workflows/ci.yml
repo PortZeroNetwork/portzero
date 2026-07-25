@@ -6,6 +6,15 @@ on:
   pull_request:
     branches:
       - staging
+  # The quick checks also run on `staging` itself, so a direct push (or a
+  # merge that lands code no PR run ever saw) can't leave the branch red
+  # without anyone noticing — fmt/clippy/tests only gating PRs is how a
+  # non-fmt-clean commit reached `staging` before. The expensive jobs
+  # (`lifecycle-upgrade-linux`, `e2e`) stay PR-only: on `staging` pushes the
+  # same ground is already covered by vm-e2e.yml and playwright-tls-verify.yml.
+  push:
+    branches:
+      - staging
   # Manual dispatch for running one job group and/or one runner OS in
   # isolation — e.g. re-running only the Windows real-TUN E2E entry while
   # debugging a hang, without paying for the full matrix.
@@ -119,7 +128,11 @@ jobs:
 
   lifecycle-upgrade-linux:
     name: Lifecycle upgrade (Linux .deb, prior -> new)
-    if: github.event_name != 'workflow_dispatch' || inputs.job == 'all' || inputs.job == 'check'
+    # Not on `staging` pushes: too slow for the quick-check set, and the same
+    # upgrade path is exercised there by vm-e2e.yml's lifecycle jobs.
+    if: >-
+      github.event_name != 'push'
+      && (github.event_name != 'workflow_dispatch' || inputs.job == 'all' || inputs.job == 'check')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -159,7 +172,11 @@ jobs:
 
   e2e:
     name: E2E real TUN overlay (${{ matrix.os }})
-    if: github.event_name != 'workflow_dispatch' || inputs.job == 'all' || inputs.job == 'e2e'
+    # Not on `staging` pushes: the privileged real-TUN coverage there comes
+    # from vm-e2e.yml (Parallels guests) rather than a second hosted matrix.
+    if: >-
+      github.event_name != 'push'
+      && (github.event_name != 'workflow_dispatch' || inputs.job == 'all' || inputs.job == 'e2e')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
