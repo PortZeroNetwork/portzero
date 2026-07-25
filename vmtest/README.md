@@ -120,7 +120,11 @@ fetched from the latest published release via `gh` if unset; the upgrade
 step SKIPs cleanly (never a false fail) when none is available. The
 cloud-tunnel step needs the rotated seed token (see `STAGING_SECRETS`/
 `VMKIT_SECRETS_HOST_DEFAULT` below) and SKIPs cleanly if none is found; set
-`COMBINED_SKIP_CLOUD=1` to skip that step outright.
+`COMBINED_SKIP_CLOUD=1` to skip that step outright. Once a seed token *is*
+present, an unreachable staging is a **failure** (`PHASE=cloud-reachable
+ok=false`), not a SKIP — a dead network or a down staging must never pass as
+green with the cloud leg silently unrun. The probe retries three times before
+declaring it down.
 
 Each script prints greppable `PHASE=<name> ok=<true|false|SKIP>` lines and a
 final `RESULT=PASS|FAIL`; a leftover artifact or a broken tunnel yields

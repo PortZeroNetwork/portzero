@@ -43,6 +43,8 @@ vm-reset vm="windows" name="ready":
 # released package if one is available (else the new one directly, skipping
 # the upgrade step), and SKIPs the cloud-tunnel step cleanly if no staging
 # seed token is available (or set COMBINED_SKIP_CLOUD=1 to skip it outright).
+# With a seed token in hand, an unreachable staging FAILS the run rather than
+# skipping — a green build must never mean "the cloud leg never ran".
 # Resets each VM to its "built" checkpoint first.
 #   just vm-test            # all platforms, in series
 #   just vm-test linux

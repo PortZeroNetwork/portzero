@@ -28,7 +28,9 @@
 #                      cloud-tunnel phase. Defaults to the same MBP-Sidecar share
 #                      path e2e-staging-tunnel.sh uses.
 #   COMBINED_SKIP_CLOUD=1  skip the cloud-tunnel phase outright (e.g. a
-#                      metered/offline session). Off by default.
+#                      metered/offline session). Off by default — and the only
+#                      supported way to skip it. With a seed token present, a
+#                      staging that does not answer 200 FAILS the run.
 # Helper predicates below are invoked indirectly (their names are passed to
 # `assert`/`assert_not` as commands), which defeats shellcheck's reachability
 # heuristic and yields spurious SC2317 "unreachable" info for every one of them.
@@ -345,9 +347,38 @@ else
     if [ -z "$SEED" ]; then
         echo "PHASE=cloud-tunnel ok=SKIP reason=\"no seed token at $STAGING_SECRETS\""
     else
-        st="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "https://app.$STAGING_DOMAIN/" 2>/dev/null)"
+        # Probe staging up to three times before believing it is down: this
+        # guest shares one physical host with the others (see vm-e2e.yml), so a
+        # single 10s curl can lose to a transient blip — the same reason `retry`
+        # exists above.
+        st=000
+        probes=0
+        while :; do
+            st="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "https://app.$STAGING_DOMAIN/" 2>/dev/null)"
+            [ "$st" = 200 ] && break
+            probes=$((probes + 1))
+            [ "$probes" -ge 3 ] && break
+            sleep 5
+        done
         if [ "$st" != 200 ]; then
-            echo "PHASE=cloud-tunnel ok=SKIP reason=\"staging not up (HTTP $st)\""
+            # This used to SKIP, which turned an unreachable staging into a
+            # PASS with the whole cloud leg silently unrun — a green build that
+            # proved nothing about the cloud path. Not reaching staging is a
+            # failure; the deliberate opt-out is COMBINED_SKIP_CLOUD=1.
+            echo "PHASE=cloud-reachable ok=false http=$st url=https://app.$STAGING_DOMAIN/"
+            echo ">> staging did not answer 200, so the cloud-tunnel test could not run."
+            if [ "$st" = 000 ]; then
+                echo ">>   HTTP 000 means no response at all: this guest has no egress, DNS"
+                echo ">>   failed, or the TLS handshake was rejected. Usually the guest's"
+                echo ">>   network adapter, not staging."
+            else
+                echo ">>   staging answered $st, so it is up but unhealthy."
+            fi
+            echo ">> next steps:"
+            echo ">>   - curl https://app.$STAGING_DOMAIN/ from the host; if that works, fix the guest's network"
+            echo ">>   - if it fails there too, check the Deploy Staging workflow in portzero-cloud"
+            echo ">>   - to run without the cloud leg on purpose, re-run with COMBINED_SKIP_CLOUD=1"
+            fails=$((fails + 1))
         else
             SUFFIX="$(date +%m%d%H%M%S)"
             USERNAME="vmtestlin${SUFFIX}"

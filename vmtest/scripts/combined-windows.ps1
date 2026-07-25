@@ -26,7 +26,10 @@
 #                     run against the new MSI installed directly.
 #   STAGING_SECRETS_FILE  path to the staging-e2e.env seed-token file for the
 #                     cloud-tunnel phase. Defaults to the MBP-Sidecar share path.
-#   COMBINED_SKIP_CLOUD=1  skip the cloud-tunnel phase outright. Off by default.
+#   COMBINED_SKIP_CLOUD=1  skip the cloud-tunnel phase outright. Off by default
+#                      — and the only supported way to skip it. With a seed
+#                      token present, a staging that does not answer 200 FAILS
+#                      the run.
 $ErrorActionPreference = 'Continue'
 
 $script:fails = 0
@@ -359,9 +362,36 @@ if ($env:COMBINED_SKIP_CLOUD -eq '1') {
     if (-not $seed) {
         "PHASE=cloud-tunnel ok=SKIP reason=`"no seed token at $secretsFile`""
     } else {
-        $apiProbe = try { (Invoke-WebRequest "https://app.$stagingDomain/" -TimeoutSec 10 -UseBasicParsing).StatusCode } catch { 0 }
+        # Probe staging up to three times before believing it is down: this
+        # guest shares one physical host with the others (see vm-e2e.yml), so a
+        # single 10s request can lose to a transient blip.
+        $apiProbe = 0
+        foreach ($probeAttempt in 1..3) {
+            # Invoke-WebRequest throws on any non-2xx, so dig the real status out
+            # of the exception: "staging answered 502" and "staging answered
+            # nothing" need different fixes, and 0 for both hides that.
+            $apiProbe = try { (Invoke-WebRequest "https://app.$stagingDomain/" -TimeoutSec 10 -UseBasicParsing).StatusCode }
+                        catch { if ($_.Exception.Response) { [int] $_.Exception.Response.StatusCode } else { 0 } }
+            if ($apiProbe -eq 200) { break }
+            if ($probeAttempt -lt 3) { Start-Sleep -Seconds 5 }
+        }
         if ($apiProbe -ne 200) {
-            "PHASE=cloud-tunnel ok=SKIP reason=`"staging not up (HTTP $apiProbe)`""
+            # This used to SKIP, which turned an unreachable staging into a
+            # PASS with the whole cloud leg silently unrun — a green build that
+            # proved nothing about the cloud path. Not reaching staging is a
+            # failure; the deliberate opt-out is COMBINED_SKIP_CLOUD=1.
+            Phase 'cloud-reachable' $false
+            ">> staging did not answer 200 (got $apiProbe) at https://app.$stagingDomain/, so the cloud-tunnel test could not run."
+            if ($apiProbe -eq 0) {
+                '>>   0 means no response at all: this guest has no egress, DNS failed, or'
+                '>>   the TLS handshake was rejected. Usually the guest network, not staging.'
+            } else {
+                ">>   staging answered $apiProbe, so it is up but unhealthy."
+            }
+            '>> next steps:'
+            ">>   - curl https://app.$stagingDomain/ from the host; if that works, fix the guest's network"
+            '>>   - if it fails there too, check the Deploy Staging workflow in portzero-cloud'
+            '>>   - to run without the cloud leg on purpose, re-run with COMBINED_SKIP_CLOUD=1'
         } else {
             $suffix = (Get-Date -Format 'MMddHHmmss')
             $user = "vmtestwin$suffix"
