@@ -484,6 +484,6 @@ mod tests {
 
     #[test]
     fn test_default_api_url_matches_the_dashboard_api() {
-        assert_eq!(endpoints::DEFAULT_API_URL, "https://app.portzero.cloud/api");
+        assert_eq!(endpoints::DEFAULT_API_URL, "https://app.portzero.net/api");
     }
 }

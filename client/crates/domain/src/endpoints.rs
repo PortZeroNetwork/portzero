@@ -7,14 +7,21 @@
 //! environment" beyond which URLs it targets, so this module — not scattered
 //! per-crate constants — is where those URLs and their defaults live.
 
+// Control-plane domain: portzero.net, not the tunnel domain (portzero.cloud).
+// See docs/operators/runbooks/control-plane-domain-migration.md in
+// portzero-cloud — the control plane (app./api./edge.) moved there so tunnel
+// content can never shadow-cookie the dashboard session. Already-shipped
+// clients stay pinned to the old app.portzero.cloud/edge.portzero.cloud hosts
+// via their own PZ_TUNNEL_* overrides; those hosts keep serving indefinitely.
+
 /// Cloud API base URL (`PZ_TUNNEL_API_URL`).
-pub const DEFAULT_API_URL: &str = "https://app.portzero.cloud/api";
+pub const DEFAULT_API_URL: &str = "https://app.portzero.net/api";
 /// Edge tunnel WebSocket URL (`PZ_TUNNEL_EDGE_URL`).
-pub const DEFAULT_EDGE_URL: &str = "wss://edge.portzero.cloud/tunnel";
+pub const DEFAULT_EDGE_URL: &str = "wss://edge.portzero.net/tunnel";
 /// Dashboard base URL (`PZ_TUNNEL_DASHBOARD_URL`).
-pub const DEFAULT_DASHBOARD_URL: &str = "https://app.portzero.cloud";
+pub const DEFAULT_DASHBOARD_URL: &str = "https://app.portzero.net";
 /// Marketing site base URL (`PZ_TUNNEL_WEB_URL`).
-pub const DEFAULT_WEB_URL: &str = "https://portzero.cloud";
+pub const DEFAULT_WEB_URL: &str = "https://portzero.net";
 /// GitHub Releases base URL (`PZ_TUNNEL_RELEASES_URL`).
 pub const DEFAULT_RELEASES_URL: &str = "https://github.com/PortZeroNetwork/portzero/releases";
 
