@@ -57,6 +57,11 @@ pub async fn run() -> Result<()> {
         failures.push(("pin the dashboard /etc/hosts entry", err));
     }
 
+    println!("Restoring ownership of your PortZero directories...");
+    if let Err(err) = restore_user_ownership() {
+        failures.push(("restore ownership of your PortZero directories", err));
+    }
+
     if failures.is_empty() {
         println!();
         println!("Setup complete.");
@@ -79,13 +84,20 @@ pub async fn run() -> Result<()> {
     )
 }
 
-/// Wait until the daemon answers over its real DNS path (up to ~30s), then
-/// launch the PortZero desktop app. Best-effort: prints a hint and returns
-/// rather than failing setup if the daemon never becomes reachable (or the app
-/// can't be launched). The readiness probe bypasses any proxy so a corporate
-/// `HTTP_PROXY` can't swallow the local request.
+/// Wait until the daemon answers, then launch the PortZero desktop app.
+/// Best-effort: prints a hint and returns rather than failing setup if the
+/// daemon never becomes reachable (or the app can't be launched). The readiness
+/// probe bypasses any proxy so a corporate `HTTP_PROXY` can't swallow the local
+/// request.
 async fn wait_and_open_app() {
-    const PROBE_URL: &str = "http://portzero.local/status.json";
+    // Probe the overlay's fixed dashboard IP with an explicit Host header
+    // instead of resolving `portzero.local`. macOS mDNSResponder claims every
+    // `.local` name before the scoped resolver is consulted, so
+    // getaddrinfo(portzero.local) can stall for tens of seconds on a machine
+    // whose overlay is already serving happily. Probing the IP measures the
+    // daemon rather than the resolver, which is what this wait is actually for.
+    let probe_url = format!("http://{DASHBOARD_IP}/status.json");
+    const OVERALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
     let client = match reqwest::Client::builder()
         .no_proxy()
@@ -96,10 +108,20 @@ async fn wait_and_open_app() {
         Err(_) => return,
     };
 
-    print!("Waiting for the daemon to become ready...");
+    print!("Waiting for the daemon to become ready");
     let _ = std::io::stdout().flush();
-    for _ in 0..30 {
-        if let Ok(resp) = client.get(PROBE_URL).send().await {
+
+    // A wall-clock deadline, not an iteration count: each attempt can take
+    // longer than its own timeout suggests, and "30 tries" silently became
+    // minutes of apparent hang when a probe was slow.
+    let started = std::time::Instant::now();
+    while started.elapsed() < OVERALL_DEADLINE {
+        if let Ok(resp) = client
+            .get(&probe_url)
+            .header("Host", DASHBOARD_HOST)
+            .send()
+            .await
+        {
             if resp.status().is_success() {
                 println!(" ready.");
                 match portzero_domain::app::launch() {
@@ -112,13 +134,81 @@ async fn wait_and_open_app() {
                 return;
             }
         }
+        // Visible progress, so a slow start reads as "working" rather than "hung".
+        print!(".");
+        let _ = std::io::stdout().flush();
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
     println!();
     println!(
-        "The daemon is not ready yet. Once `portzero status` shows it running, \
-         open the PortZero app from your applications menu or run `portzero start`."
+        "The daemon did not answer within {}s. Setup itself completed — everything above \
+         was applied. Check `portzero doctor`; if it reports the overlay is active, you can \
+         open the PortZero app from your applications menu or run `portzero start`.",
+        OVERALL_DEADLINE.as_secs()
     );
+}
+
+/// Give the invoking user back ownership of the directories setup just wrote.
+///
+/// Setup runs as root (via `sudo`), but every path it touches lives under the
+/// *real* user's home — the CA in `~/.local/share/PortZero`, routes and the
+/// login token in `~/.portzero`. Without this, `sudo portzero setup` leaves
+/// those directories owned by root, and the very next unprivileged command the
+/// user runs fails: `portzero login` cannot write `~/.portzero/auth.json`.
+/// That made the documented install path (brew caveats say `sudo portzero
+/// setup`) produce a CLI that could not log in.
+///
+/// Root can still write to these paths afterwards, so the daemon is unaffected.
+/// No-op when not running under `sudo`.
+fn restore_user_ownership() -> Result<()> {
+    let Some((user, home)) = sudo_invoker() else {
+        println!("Not running under sudo; ownership unchanged.");
+        return Ok(());
+    };
+
+    let dirs = [home.join(".portzero"), home.join(".local/share/PortZero")];
+    let mut restored = Vec::new();
+    for dir in dirs.iter().filter(|d| d.exists()) {
+        // `chown` resolves the account name itself, which matters on macOS
+        // where regular users live in Directory Services, not /etc/passwd.
+        let status = std::process::Command::new("chown")
+            .arg("-R")
+            .arg(format!("{user}:"))
+            .arg(dir)
+            .status()
+            .with_context(|| format!("could not run chown on {}", dir.display()))?;
+        if !status.success() {
+            anyhow::bail!(
+                "chown -R {user}: {} failed ({status}). Run it yourself, or `portzero login` \
+                 will not be able to write its token.",
+                dir.display()
+            );
+        }
+        restored.push(dir.display().to_string());
+    }
+
+    if restored.is_empty() {
+        println!("No PortZero directories to reassign.");
+    } else {
+        println!("Ownership restored to {user}: {}", restored.join(", "));
+    }
+    Ok(())
+}
+
+/// The real user behind `sudo`, and their home directory. `None` when setup was
+/// not invoked through `sudo` (so the files already belong to whoever ran it).
+fn sudo_invoker() -> Option<(String, std::path::PathBuf)> {
+    let user = std::env::var("SUDO_USER").ok()?;
+    if user.is_empty() || user == "root" {
+        return None;
+    }
+    // HOME is the reliable source here: macOS `sudo` preserves it, and regular
+    // macOS accounts are absent from /etc/passwd.
+    let home = std::env::var("HOME").ok().map(std::path::PathBuf::from)?;
+    if home.as_os_str().is_empty() || home == std::path::Path::new("/var/root") {
+        return None;
+    }
+    Some((user, home))
 }
 
 /// Install the scoped `*.portzero.local` OS resolver as part of setup so name
@@ -214,5 +304,50 @@ mod tests {
     fn rejects_wrong_dashboard_ip() {
         let hosts = "127.0.0.1 portzero.local\n";
         assert!(!has_expected_dashboard_hosts_entry(hosts));
+    }
+
+    /// Serializes the tests below, which mutate process-global env vars.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn sudo_invoker_identifies_the_real_user() {
+        let _guard = env_lock();
+        std::env::set_var("SUDO_USER", "alice");
+        std::env::set_var("HOME", "/Users/alice");
+        let (user, home) = sudo_invoker().expect("sudo invoker should be detected");
+        assert_eq!(user, "alice");
+        assert_eq!(home, std::path::Path::new("/Users/alice"));
+        std::env::remove_var("SUDO_USER");
+    }
+
+    #[test]
+    fn sudo_invoker_is_none_without_sudo() {
+        let _guard = env_lock();
+        std::env::remove_var("SUDO_USER");
+        std::env::set_var("HOME", "/Users/alice");
+        assert!(sudo_invoker().is_none());
+    }
+
+    #[test]
+    fn sudo_invoker_is_none_when_root_invoked_directly() {
+        let _guard = env_lock();
+        // `sudo -u root` (or a root login shell) leaves nothing to hand back.
+        std::env::set_var("SUDO_USER", "root");
+        std::env::set_var("HOME", "/Users/alice");
+        assert!(sudo_invoker().is_none());
+        std::env::remove_var("SUDO_USER");
+    }
+
+    #[test]
+    fn sudo_invoker_rejects_roots_home() {
+        let _guard = env_lock();
+        // Without HOME preservation we would otherwise chown /var/root.
+        std::env::set_var("SUDO_USER", "alice");
+        std::env::set_var("HOME", "/var/root");
+        assert!(sudo_invoker().is_none());
+        std::env::remove_var("SUDO_USER");
     }
 }
