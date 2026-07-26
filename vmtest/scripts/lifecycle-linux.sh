@@ -35,8 +35,13 @@
 set -uo pipefail
 
 BIN=/usr/local/bin/portzero
+TRAY_BIN=/usr/local/bin/portzero-tray
 SYSTEM_UNIT=/usr/lib/systemd/user/portzero-daemon.service
 USER_UNIT="${HOME}/.config/systemd/user/portzero-daemon.service"
+# Shipped by the .deb (client/crates/cli/Cargo.toml assets), not generated at
+# runtime: the app-launcher entry and the tray's XDG autostart registration.
+APP_LAUNCHER_ENTRY=/usr/share/applications/portzero.desktop
+TRAY_AUTOSTART_ENTRY=/etc/xdg/autostart/portzero-tray.desktop
 HOSTS_PIN='# portzero-local'
 # Trust-store destinations, mirroring client/crates/daemon/src/tls/trust.rs.
 CA_DEBIAN=/usr/share/ca-certificates/portzero/portzero-local-ca.crt
@@ -73,6 +78,17 @@ assert_not() {
         echo "PHASE=$phase ok=true"
     fi
 }
+# Like assert, but never counts as a failure: reports ok=true when the
+# predicate holds, else ok=SKIP with a reason. Reserved for runtime states a
+# headless `prlctl exec` install genuinely cannot guarantee — whether the tray
+# is actually running depends on a live desktop session existing at install
+# time (see tray_process_running below), which this VM login state can't
+# promise either way.
+assert_or_skip() {
+    local phase="$1" reason="$2"; shift 2
+    if "$@" >/dev/null 2>&1; then echo "PHASE=$phase ok=true"
+    else echo "PHASE=$phase ok=SKIP reason=\"$reason\""; fi
+}
 
 has_cap() { # <cap-substring>
     local caps; caps="$(getcap "$BIN" 2>/dev/null || true)"
@@ -91,6 +107,7 @@ bundle_has_ca() {
 }
 autostart_installed() { "$BIN" autostart status 2>/dev/null | grep -qi 'Autostart: installed'; }
 tun_present() { ip link show "$TUN_IFACE" >/dev/null 2>&1; }
+tray_process_running() { pgrep -x portzero-tray >/dev/null 2>&1; }
 
 find_deb() {
     if [ -n "${PORTZERO_DEB:-}" ]; then printf '%s\n' "$PORTZERO_DEB"; return; fi
@@ -120,6 +137,19 @@ assert install-cap-net-admin     has_cap cap_net_admin
 assert install-cap-net-bind      has_cap cap_net_bind_service
 assert install-hosts-pin         hosts_has_pin
 assert install-systemd-unit      test -f "$SYSTEM_UNIT"
+
+# Tray icon + app-launcher entry: proves the package lands the tray binary,
+# registers it for XDG autostart, and gives the desktop app a launcher entry,
+# all without any post-install step from the user.
+assert install-tray-binary          test -x "$TRAY_BIN"
+assert install-app-launcher-entry   test -f "$APP_LAUNCHER_ENTRY"
+assert install-tray-autostart-entry test -f "$TRAY_AUTOSTART_ENTRY"
+# postinst best-effort launches the tray immediately when a live desktop
+# session (D-Bus socket) is present for the installing user; whether this VM's
+# `dpkg -i` runs under one is not guaranteed, so this can't be a hard assert.
+assert_or_skip install-tray-running \
+    "postinst only launches the tray immediately under a live desktop session for the installing user; this VM's dpkg -i may run headless (autostart is still registered regardless, via install-tray-autostart-entry)" \
+    tray_process_running
 
 # --- USE: trust store + autostart (needs the REAL binary) ------------------
 if [ "${LIFECYCLE_SKIP_CLI:-0}" = 1 ]; then
@@ -163,6 +193,10 @@ assert_not clean-binary          test -e "$BIN"
 assert_not clean-systemd-unit    test -e "$SYSTEM_UNIT"
 assert_not clean-hosts-pin       hosts_has_pin
 assert_not clean-tun             tun_present
+assert_not clean-tray-binary          test -e "$TRAY_BIN"
+assert_not clean-app-launcher-entry   test -e "$APP_LAUNCHER_ENTRY"
+assert_not clean-tray-autostart-entry test -e "$TRAY_AUTOSTART_ENTRY"
+assert_not clean-tray-running         tray_process_running
 if [ "${LIFECYCLE_SKIP_CLI:-0}" != 1 ]; then
     assert_not clean-user-unit       test -e "$USER_UNIT"
     assert_not clean-autostart       autostart_installed

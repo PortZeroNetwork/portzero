@@ -38,8 +38,13 @@
 set -uo pipefail
 
 BIN=/usr/local/bin/portzero
+TRAY_BIN=/usr/local/bin/portzero-tray
 SYSTEM_UNIT=/usr/lib/systemd/user/portzero-daemon.service
 USER_UNIT="${HOME}/.config/systemd/user/portzero-daemon.service"
+# Shipped by the .deb (client/crates/cli/Cargo.toml assets), not generated at
+# runtime: the app-launcher entry and the tray's XDG autostart registration.
+APP_LAUNCHER_ENTRY=/usr/share/applications/portzero.desktop
+TRAY_AUTOSTART_ENTRY=/etc/xdg/autostart/portzero-tray.desktop
 HOSTS_PIN='# portzero-local'
 # Trust-store destinations, mirroring client/crates/daemon/src/tls/trust.rs.
 CA_DEBIAN=/usr/share/ca-certificates/portzero/portzero-local-ca.crt
@@ -106,6 +111,15 @@ retry() {
     done
 }
 negate() { ! "$@"; }
+# Like assert, but never counts as a failure: reports ok=true when the
+# predicate holds, else ok=SKIP with a reason. Reserved for runtime states a
+# headless `prlctl exec` install genuinely cannot guarantee (see
+# tray_process_running below).
+assert_or_skip() {
+    local phase="$1" reason="$2"; shift 2
+    if "$@" >/dev/null 2>&1; then echo "PHASE=$phase ok=true"
+    else echo "PHASE=$phase ok=SKIP reason=\"$reason\""; fi
+}
 # assert_eventually / assert_not_eventually : like assert / assert_not, but give
 # the condition a few tries first — for checks that shell out to openssl or the
 # daemon and can momentarily fail under host load rather than because the state
@@ -150,6 +164,7 @@ bundle_has_ca() {
             | openssl pkcs7 -print_certs -noout 2>/dev/null | grep -qF "$CA_SUBJECT_CN"
 }
 autostart_installed() { "$BIN" autostart status 2>/dev/null | grep -qi 'Autostart: installed'; }
+tray_process_running() { pgrep -x portzero-tray >/dev/null 2>&1; }
 
 find_deb() {
     if [ -n "${PORTZERO_DEB:-}" ]; then printf '%s\n' "$PORTZERO_DEB"; return; fi
@@ -307,6 +322,19 @@ assert install-cap-net-bind      has_cap cap_net_bind_service
 assert install-hosts-pin         hosts_has_pin
 assert install-systemd-unit      test -f "$SYSTEM_UNIT"
 
+# Tray icon + app-launcher entry: proves the package lands the tray binary,
+# registers it for XDG autostart, and gives the desktop app a launcher entry,
+# all without any post-install step from the user.
+assert install-tray-binary          test -x "$TRAY_BIN"
+assert install-app-launcher-entry   test -f "$APP_LAUNCHER_ENTRY"
+assert install-tray-autostart-entry test -f "$TRAY_AUTOSTART_ENTRY"
+# postinst best-effort launches the tray immediately when a live desktop
+# session (D-Bus socket) is present for the installing user; whether this VM's
+# `dpkg -i` runs under one is not guaranteed, so this can't be a hard assert.
+assert_or_skip install-tray-running \
+    "postinst only launches the tray immediately under a live desktop session for the installing user; this VM's dpkg -i may run headless (autostart is still registered regardless, via install-tray-autostart-entry)" \
+    tray_process_running
+
 echo ">> installing local CA into the system trust store"
 sudo_ env HOME="$HOME" "$BIN" trust generate >/dev/null 2>&1 || true
 # Retry: `trust install` runs update-ca-certificates, which can be OOM-killed
@@ -424,6 +452,10 @@ sudo_ dpkg --purge portzero >/tmp/pz-dpkg-r.log 2>&1 || sudo_ dpkg -r portzero >
 assert_not clean-binary          test -e "$BIN"
 assert_not clean-systemd-unit    test -e "$SYSTEM_UNIT"
 assert_not clean-hosts-pin       hosts_has_pin
+assert_not clean-tray-binary          test -e "$TRAY_BIN"
+assert_not clean-app-launcher-entry   test -e "$APP_LAUNCHER_ENTRY"
+assert_not clean-tray-autostart-entry test -e "$TRAY_AUTOSTART_ENTRY"
+assert_not clean-tray-running         tray_process_running
 assert_not clean-user-unit       test -e "$USER_UNIT"
 assert_not clean-autostart       autostart_installed
 assert_not clean-ca-anchor       test -e "$CA_DEBIAN"
