@@ -24,7 +24,7 @@ const EVENT_END: &str = "example://end";
 pub async fn get_status() -> Value {
     // Daemon I/O must never run on the Tauri main thread: a blocking
     // command holds the UI for the whole round trip.
-    tauri::async_runtime::spawn_blocking(move || core::get_status())
+    tauri::async_runtime::spawn_blocking(core::get_status)
         .await
         .unwrap_or_else(|e| panic!("get_status task panicked: {e}"))
 }
@@ -34,7 +34,7 @@ pub async fn get_status() -> Value {
 pub async fn examples_status() -> Result<Value, String> {
     // Daemon I/O must never run on the Tauri main thread: a blocking
     // command holds the UI for the whole round trip.
-    tauri::async_runtime::spawn_blocking(move || core::examples_status())
+    tauri::async_runtime::spawn_blocking(core::examples_status)
         .await
         .unwrap_or_else(|e| panic!("examples_status task panicked: {e}"))
 }
@@ -44,7 +44,7 @@ pub async fn examples_status() -> Result<Value, String> {
 pub async fn download_examples() -> Result<Value, String> {
     // Daemon I/O must never run on the Tauri main thread: a blocking
     // command holds the UI for the whole round trip.
-    tauri::async_runtime::spawn_blocking(move || core::download_examples())
+    tauri::async_runtime::spawn_blocking(core::download_examples)
         .await
         .unwrap_or_else(|e| panic!("download_examples task panicked: {e}"))
 }
@@ -165,7 +165,7 @@ pub fn open_external(url: String) -> Result<(), String> {
 pub async fn get_versions() -> Value {
     // Daemon I/O must never run on the Tauri main thread: a blocking
     // command holds the UI for the whole round trip.
-    tauri::async_runtime::spawn_blocking(move || core::get_versions())
+    tauri::async_runtime::spawn_blocking(core::get_versions)
         .await
         .unwrap_or_else(|e| panic!("get_versions task panicked: {e}"))
 }
