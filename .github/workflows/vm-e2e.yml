@@ -247,7 +247,11 @@ jobs:
         # to stage into the generated Homebrew formula (PORTZERO_TRAY_EXE
         # defaults to this sibling path when unset).
         if: matrix.platform == 'macos'
-        run: cargo build --release -p portzero-cli --bin portzero --bin portzero-tray
+        # portzero-tray lives in its own workspace crate (not a bin inside
+        # portzero-cli), so this can't stay scoped with -p portzero-cli —
+        # same unscoped --bin pattern package-linux-deb / package-windows-msi
+        # already use to build both.
+        run: cargo build --release --bin portzero --bin portzero-tray
 
       - name: Download windows binary
         if: matrix.platform == 'windows'
