@@ -70,15 +70,33 @@ pub(super) fn is_process_alive(pid: u32) -> bool {
 /// Send a stop signal to `pid`. With `force`, escalates to SIGKILL (`taskkill /F`
 /// on Windows); otherwise a graceful SIGTERM (Unix). Best-effort: only a failure
 /// to launch the kill command surfaces as an error.
+/// Signal a daemon process, failing when the signal was *not* delivered.
+///
+/// The exit status matters and used to be discarded. `kill` exits non-zero when
+/// it may not signal the target — which is exactly what happens when an
+/// unprivileged process tries to take over a root LaunchDaemon — so dropping the
+/// status made a refused signal indistinguishable from a delivered one. The
+/// caller then waited for a process that was never asked to exit, and started
+/// alongside it. Observed live: two root daemons plus an unprivileged one, each
+/// having "taken over" from the last.
 fn signal_pid(pid: u32, force: bool) -> Result<()> {
     #[cfg(unix)]
     {
         use std::process::Command;
         let sig = if force { "-KILL" } else { "-TERM" };
-        Command::new("kill")
+        let out = Command::new("kill")
             .args([sig, &pid.to_string()])
-            .status()
+            .output()
             .with_context(|| format!("Failed to signal daemon process {pid}"))?;
+        if !out.status.success() {
+            let detail = String::from_utf8_lossy(&out.stderr);
+            let detail = detail.trim();
+            anyhow::bail!(
+                "could not signal daemon process {pid}{}{}",
+                if detail.is_empty() { "" } else { ": " },
+                detail
+            );
+        }
     }
     #[cfg(windows)]
     {
@@ -86,10 +104,19 @@ fn signal_pid(pid: u32, force: bool) -> Result<()> {
         // Windows has no graceful console signal we can reliably deliver to a
         // detached process, so we terminate it directly in both cases.
         let _ = force;
-        Command::new("taskkill")
+        let out = Command::new("taskkill")
             .args(["/PID", &pid.to_string(), "/F"])
-            .status()
+            .output()
             .with_context(|| format!("Failed to terminate daemon process {pid}"))?;
+        if !out.status.success() {
+            let detail = String::from_utf8_lossy(&out.stderr);
+            let detail = detail.trim();
+            anyhow::bail!(
+                "could not terminate daemon process {pid}{}{}",
+                if detail.is_empty() { "" } else { ": " },
+                detail
+            );
+        }
     }
     Ok(())
 }
@@ -117,7 +144,8 @@ pub(super) fn acquire_singleton_or_take_over(config: &DaemonConfig) -> Result<()
             tracing::warn!(
                 "Another discovery daemon (PID {other}) is already running; taking over"
             );
-            if let Err(e) = signal_pid(other, false) {
+            let term = signal_pid(other, false);
+            if let Err(e) = &term {
                 tracing::warn!("Failed to signal existing daemon {other}: {e:#}");
             }
 
@@ -134,6 +162,39 @@ pub(super) fn acquire_singleton_or_take_over(config: &DaemonConfig) -> Result<()
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(100));
+            }
+
+            // Refuse to start when the incumbent is still there. Claiming the
+            // PID file anyway is what produced duplicate daemons: two processes
+            // fighting over the TUN device, the DNS port and the cloud session,
+            // with the PID file naming whichever wrote last — so `doctor` and
+            // the tray would then report "not running" and start yet another.
+            // The common cause is an unprivileged `portzero start` (from
+            // `login`, the tray, or the app) meeting a root service daemon.
+            if crate::management::pid_lookup::pid_is_alive(other) {
+                let refused = term.is_err();
+                anyhow::bail!(
+                    "Another PortZero daemon (PID {other}) is already running and this process \
+                     could not stop it{}.\n\n\
+                     Refusing to start a second daemon — two would fight over the network \
+                     device, the DNS port and the cloud session.\n\n\
+                     {}",
+                    if refused {
+                        " (the signal was refused, which usually means it is running as root)"
+                    } else {
+                        ""
+                    },
+                    if refused {
+                        "That daemon is privileged, so stopping it needs the same privileges:\n  \
+                         sudo portzero restart\n\n\
+                         If it was installed as a service, restart it through the service \
+                         manager instead:\n  \
+                         sudo launchctl kickstart -k system/cloud.portzero.daemon   (macOS)\n  \
+                         sudo systemctl restart portzero                            (Linux)"
+                    } else {
+                        "Stop it first with `portzero stop`, then start again."
+                    }
+                );
             }
             tracing::info!("Previous daemon {other} has exited; claiming ownership");
         }

@@ -202,11 +202,27 @@ fn check_daemon_running(config: &DaemonConfig, pid: Option<u32>) -> Check {
                 .unwrap_or_default();
             Check::pass("daemon running", format!("PID {pid}{uptime}"))
         }
-        None => Check::fail(
-            "daemon running",
-            "the daemon is not running",
-            "portzero start",
-        ),
+        // The PID file only records the daemon that started last, and it is
+        // removed when that PID dies — so a daemon this user cannot manage
+        // (typically the root service) reads back as "not running". Saying so
+        // is what led the tray and the app to start another one. Distinguish
+        // the two cases before reporting.
+        None => match portzero_daemon::management::pid_lookup::find_unmanaged_daemon() {
+            Some(pid) => Check::fail(
+                "daemon running",
+                format!(
+                    "a daemon is running (PID {pid}) but is not the one recorded in this \
+                     user's state file — it was most likely started by the system service, \
+                     so this user cannot manage it"
+                ),
+                "sudo portzero restart",
+            ),
+            None => Check::fail(
+                "daemon running",
+                "the daemon is not running",
+                "portzero start",
+            ),
+        },
     }
 }
 

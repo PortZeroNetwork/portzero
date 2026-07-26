@@ -157,6 +157,36 @@ fn pid_for_source_port_impl(_source_port: u16) -> Option<u32> {
 }
 
 /// Return `true` if a process with the given PID is currently running.
+/// Find a running PortZero daemon that the state file does not account for.
+///
+/// The PID file is written by whichever daemon started last, and
+/// [`read_daemon_pid`](crate::discovery_loop::read_daemon_pid) deletes it when
+/// that PID is dead. So a daemon this user cannot manage — typically the root
+/// LaunchDaemon/systemd unit — reads back as "no daemon at all". Callers that
+/// act on that conclusion (the tray, the app, `doctor`) then start another one,
+/// which is how a machine ends up with several.
+///
+/// Returns the PID of a live `portzero start` process other than this one, so a
+/// caller can say "running, but not the instance recorded here" instead of
+/// "not running". Best-effort: an empty result only means none was found.
+#[cfg(unix)]
+pub fn find_unmanaged_daemon() -> Option<u32> {
+    let me = std::process::id();
+    let out = std::process::Command::new("pgrep")
+        .args(["-f", "portzero start"])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.trim().parse::<u32>().ok())
+        .find(|&pid| pid != me && pid_is_alive(pid))
+}
+
+#[cfg(not(unix))]
+pub fn find_unmanaged_daemon() -> Option<u32> {
+    None
+}
+
 pub fn pid_is_alive(pid: u32) -> bool {
     // PID 0 is never a real process to probe, and it is what a truncated or
     // corrupt pidfile reads back as. It must not be reported alive: on macOS
