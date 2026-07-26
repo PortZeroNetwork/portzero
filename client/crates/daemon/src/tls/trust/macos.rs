@@ -101,7 +101,123 @@ fn install_system_keychain(ca_cert_path: &Path) -> Result<()> {
     )
     .context("security add-trusted-cert")?;
     tracing::info!("macOS: installed CA cert to system keychain");
+
+    // Sweep again, now by hash, keeping only the anchor we just installed.
+    // The pre-install sweep above deletes by common name and cannot tell one
+    // PortZero CA from another, so it silently leaves everything behind
+    // whenever `security delete-certificate` fails — which it does on macOS
+    // when the System keychain declines a non-interactive trust edit. Observed
+    // in the wild: three trusted `PortZero Local CA` anchors on one machine,
+    // two of them predating name constraints and therefore trusted for *any*
+    // host. Those are inert without their private keys (the CA key is
+    // generated in memory and never persisted, see tls::ca), but an
+    // accumulating pile of unconstrained roots in a user's system store is not
+    // something to leave to chance.
+    purge_superseded_anchors(ca_cert_path);
     Ok(())
+}
+
+/// Delete every trusted `PortZero Local CA` anchor whose SHA-256 differs from
+/// the one at `keep_path`. Deleting by hash is precise, so unlike the
+/// delete-by-name sweep this cannot remove the anchor we depend on.
+fn purge_superseded_anchors(keep_path: &Path) {
+    let Some(keep) = sha256_of_cert(keep_path) else {
+        return;
+    };
+    let stale: Vec<String> = system_keychain_ca_hashes()
+        .into_iter()
+        .filter(|h| !h.eq_ignore_ascii_case(&keep))
+        .collect();
+    if stale.is_empty() {
+        return;
+    }
+
+    let mut left = Vec::new();
+    for hash in stale {
+        if run_command(
+            "security",
+            &[
+                "delete-certificate",
+                "-Z",
+                &hash,
+                "-t",
+                "/Library/Keychains/System.keychain",
+            ],
+        )
+        .is_ok()
+        {
+            tracing::info!("macOS: removed superseded PortZero CA anchor {hash}");
+        } else {
+            left.push(hash);
+        }
+    }
+
+    if !left.is_empty() {
+        // Actionable rather than silent: these stay trusted until removed, and
+        // the user is the only one who can authorize it if the daemon could not.
+        tracing::warn!(
+            "macOS: {} superseded PortZero CA anchor(s) are still trusted and could not be \
+             removed automatically. Remove them with:\n{}",
+            left.len(),
+            left.iter()
+                .map(|h| format!(
+                    "  sudo security delete-certificate -Z {h} -t /Library/Keychains/System.keychain"
+                ))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+}
+
+/// SHA-256 fingerprints of every `PortZero Local CA` in the System keychain.
+fn system_keychain_ca_hashes() -> Vec<String> {
+    let Ok(output) = std::process::Command::new("security")
+        .args([
+            "find-certificate",
+            "-a",
+            "-Z",
+            "-c",
+            CERT_NICKNAME,
+            "/Library/Keychains/System.keychain",
+        ])
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("SHA-256 hash:"))
+        .map(|h| h.trim().to_string())
+        .collect()
+}
+
+/// SHA-256 fingerprint of a PEM cert on disk as uppercase hex with no
+/// separators, matching the format `security find-certificate -Z` prints.
+/// Shells out to `openssl` (already required elsewhere in this module's
+/// workflow) rather than pulling a digest crate in for one call.
+fn sha256_of_cert(path: &Path) -> Option<String> {
+    let output = std::process::Command::new("openssl")
+        .arg("x509")
+        .arg("-in")
+        .arg(path)
+        .args(["-noout", "-fingerprint", "-sha256"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    // e.g. "sha256 Fingerprint=CF:7A:C1:..." -> "CF7AC1..."
+    let text = String::from_utf8_lossy(&output.stdout);
+    let (_, hex) = text.split_once('=')?;
+    let hex: String = hex
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .collect();
+    if hex.is_empty() {
+        return None;
+    }
+    Some(hex.to_ascii_uppercase())
 }
 
 /// Best-effort removal of every "PortZero Local CA" anchor from the system
