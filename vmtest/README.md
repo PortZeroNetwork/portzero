@@ -1,7 +1,8 @@
 # Parallels VM system-test harness
 
 > The VM control plane now lives in [vmkit](https://github.com/PortZeroNetwork/vmkit)
-> (`brew install portzeronetwork/portzero/vmkit`): snapshot ladder, boot policy,
+> (private; install from a checkout with `just install` — deliberately not in
+> the public portzero tap): snapshot ladder, boot policy,
 > guarded guest exec, doctor, and the human-setup contract. This repo keeps only
 > what is portzero-specific: flavor scripts, provisioning, the installer cache,
 > and `./vmkit.conf`. Machine inventory: `~/.config/vmkit/host.conf`.

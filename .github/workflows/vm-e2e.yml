@@ -250,10 +250,23 @@ jobs:
       - name: Ensure vmkit (VM control plane) is installed
         # The harness runs through vmkit (see ./vmkit.conf and
         # ~/.config/vmkit/host.conf on the runner; `vmkit doctor` validates the
-        # host). Installed via the tap so every checkout uses the same pinned
-        # version rather than whatever scripts are lying around.
+        # host).
+        #
+        # NOT installed here. vmkit is an internal, private tool and is
+        # deliberately not distributed through Homebrew — publishing a formula
+        # meant the PUBLIC portzero tap advertised a private repo's name,
+        # description and a license it doesn't have, inside the product's own
+        # namespace. It is installed on this runner from a checkout
+        # (`just install`); see vmkit's README.
+        #
+        # So: assert it's present and fail loudly if it isn't, rather than
+        # silently installing something.
         run: |
-          command -v vmkit >/dev/null || brew install portzeronetwork/portzero/vmkit
+          command -v vmkit >/dev/null || {
+            echo "::error::vmkit is not installed on this runner."
+            echo "Install it from a checkout: git clone git@github.com:PortZeroNetwork/vmkit.git && cd vmkit && just install"
+            exit 1
+          }
           vmkit version
 
       # No rust toolchain / cargo here: every binary under test (windows,

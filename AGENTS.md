@@ -41,7 +41,8 @@ The org has exactly one self-hosted macOS runner, and it is a developer's
 personal MacBook Pro — not a throwaway/ephemeral box. It also hosts the
 Parallels VMs used for VM-based E2E testing (see `vmtest/README.md` and
 `.github/workflows/vm-e2e.yml`), driven through `vmkit`
-(`portzeronetwork/portzero/vmkit` tap).
+(private, internal tool — installed from a checkout via `just install`, NOT
+from the public portzero Homebrew tap).
 
 **Never add a workflow step that runs `sudo` (or anything else host-mutating
 — installing system packages, modifying trust stores, etc.) directly on that
