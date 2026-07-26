@@ -145,15 +145,24 @@ mod tests {
 
     #[test]
     fn current_process_owns_its_listener_but_not_another_process_listener() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        assert!(pid_is_listening_on(std::process::id(), port));
-
+        // Spawn the child BEFORE binding. `Command::spawn` forks, and until the
+        // exec completes the child's /proc/<pid>/fd is a copy of ours — so a
+        // listener created first can appear in the child's fd table, and this
+        // test read that as "the child is listening on our port". Creating the
+        // socket after the fork makes it impossible for the child to hold that
+        // inode, so the assertion tests process ownership rather than a race
+        // against exec.
         let mut child = std::process::Command::new("sh")
             .args(["-c", "sleep 2"])
             .spawn()
             .unwrap();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        assert!(pid_is_listening_on(std::process::id(), port));
         assert!(!pid_is_listening_on(child.id(), port));
+
         child.kill().unwrap();
         child.wait().unwrap();
     }
