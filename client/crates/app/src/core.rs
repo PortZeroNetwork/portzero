@@ -95,8 +95,7 @@ fn daemon_post(path: &str, timeout: Duration) -> Result<reqwest::blocking::Respo
 /// Fetch `/status.json` and return it enriched with a `running` flag, or a
 /// daemon-down fallback object the UI can still render.
 ///
-/// The fallback consults the on-disk daemon PID (via
-/// [`portzero_domain`]-independent means below) so that a daemon which is up but
+/// The fallback consults the on-disk daemon PID so that a daemon which is up but
 /// whose overlay isn't routing `portzero.local` yet is still reported as
 /// running — the UI then offers Restart rather than Start.
 pub fn get_status() -> Value {
@@ -115,17 +114,34 @@ pub fn get_status() -> Value {
             }
             v
         }
-        Err(reason) => fallback_status(&reason),
+        Err(reason) => fallback_status(&reason, on_disk_daemon_pid()),
     }
 }
 
-/// A daemon-down status object with the same shape the UI reads from
+/// The daemon's PID as recorded on disk, or `None` when no live daemon owns the
+/// PID file.
+///
+/// This is the only view of the daemon we still have when the overlay is down,
+/// and it is what separates "no daemon at all" from "a daemon is up but its
+/// virtual network never came up" — two states that need opposite advice.
+/// `read_daemon_pid` already discards a stale PID whose process has exited.
+fn on_disk_daemon_pid() -> Option<u32> {
+    use portzero_daemon::discovery_loop::{read_daemon_pid, DaemonConfig};
+
+    read_daemon_pid(&DaemonConfig::load())
+}
+
+/// A daemon-unreachable status object with the same shape the UI reads from
 /// `/status.json`, so every panel renders empty-but-valid instead of erroring.
-pub fn fallback_status(reason: &str) -> Value {
+///
+/// `daemon_pid` is the on-disk PID (see [`on_disk_daemon_pid`]); it is passed in
+/// rather than read here so this stays a pure function of observed state and its
+/// tests don't depend on whether a daemon happens to be running on the machine.
+pub fn fallback_status(reason: &str, daemon_pid: Option<u32>) -> Value {
     json!({
-        "running": false,
+        "running": daemon_pid.is_some(),
         "reachable": false,
-        "daemon_pid": Value::Null,
+        "daemon_pid": daemon_pid.map(|p| json!(p)).unwrap_or(Value::Null),
         "overlay_active": false,
         "auth_authenticated": false,
         "local_services": [],
@@ -145,12 +161,36 @@ pub fn fallback_status(reason: &str) -> Value {
             "redirect_port_80": false,
             "passthrough_port_443": false
         },
-        "status_message": format!(
-            "The PortZero daemon isn't reachable at {LOCAL_BASE} ({reason}). \
-             Start it below. If it is running, its overlay network may not be \
-             active yet — check the daemon status or run `portzero status` in a terminal."
-        ),
+        "status_message": unreachable_message(reason, daemon_pid),
     })
+}
+
+/// Explain *why* the daemon can't be reached, and what to do about it.
+///
+/// The two cases need opposite advice, and telling them apart is the whole point
+/// of reading the PID file: with no daemon at all the fix is to start one, but
+/// with a daemon already running the fix is to restart it with privileges —
+/// telling that user to "start it" sends them to a button that will report
+/// "already running" and change nothing.
+fn unreachable_message(reason: &str, daemon_pid: Option<u32>) -> String {
+    match daemon_pid {
+        Some(pid) => format!(
+            "The PortZero daemon is running (PID {pid}), but its overlay network \
+             isn't answering at {LOCAL_BASE} ({reason}).\n\n\
+             The usual cause is a daemon that was started without administrator \
+             privileges, so it could not create the virtual network device that \
+             serves *.portzero.local. Use \"Restart daemon\" below, or run \
+             `sudo portzero restart` in a terminal. `portzero doctor` reports \
+             exactly which checks are failing."
+        ),
+        None => format!(
+            "The PortZero daemon isn't running, so nothing is answering at \
+             {LOCAL_BASE} ({reason}).\n\n\
+             Use \"Start daemon\" below, or run `portzero start` in a terminal. \
+             If it starts but tunnels still don't resolve, run `portzero doctor` \
+             for a full diagnosis."
+        ),
+    }
 }
 
 /// GET `/v1/examples/status`.
@@ -352,21 +392,60 @@ impl SseParser {
     }
 }
 
-/// Run `portzero <sub>` detached (best-effort), mirroring the tray so the two
-/// drive the daemon identically. `--no-browser` is passed for lifecycle
-/// commands that would otherwise pop a browser, since the app is the GUI.
+/// How long a daemon lifecycle command gets before the app stops waiting.
+///
+/// Generous, because `restart` legitimately takes seconds: it stops the old
+/// daemon, starts a new one, waits for the overlay, then re-runs the first-run
+/// checks. The cap exists so that a wedged daemon surfaces as a message instead
+/// of a button that spins forever — un-timeboxed daemon startup waits have
+/// wedged this product before.
+const CLI_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// Run `portzero <sub>` to completion and report what actually happened.
+///
+/// This used to spawn the CLI detached with stdout and stderr on `Stdio::null()`
+/// and return `Ok(())` the instant `spawn()` succeeded, so every failure was
+/// invisible: the button showed a spinner for a few hundred milliseconds and
+/// then behaved as though nothing had been clicked. Waiting for the exit status
+/// is necessary but not sufficient — the CLI exits 0 for no-ops such as "Daemon
+/// is already running" — so the caller also checks the daemon's real state via
+/// [`verify_outcome`].
+///
+/// `--no-browser` is passed for lifecycle commands that would otherwise pop a
+/// browser, since this app *is* the GUI.
 fn run_cli(sub: &str) -> Result<(), String> {
     let bin = portzero_domain::app::cli_bin();
+
+    // stdout/stderr go to a file rather than a pipe. The CLI's own output is the
+    // only explanation the user gets when a command succeeds without changing
+    // anything, so it has to be captured — but a pipe would deadlock if any
+    // descendant inherited the write end and outlived the CLI, which is exactly
+    // how `portzero start` behaves (it leaves a daemon running behind it).
+    let log_path =
+        std::env::temp_dir().join(format!("portzero-app-{sub}-{}.log", std::process::id()));
+    let log = std::fs::File::create(&log_path).map_err(|e| {
+        format!(
+            "Couldn't create a temporary file to capture `portzero {sub}` output \
+             ({}): {e}.\n\
+             Check that {} is writable.",
+            log_path.display(),
+            std::env::temp_dir().display()
+        )
+    })?;
+    let log_err = log
+        .try_clone()
+        .map_err(|e| format!("Couldn't capture `portzero {sub}` output: {e}."))?;
+
     let mut cmd = Command::new(&bin);
     cmd.arg(sub);
     if sub == "start" || sub == "restart" {
         cmd.arg("--no-browser");
     }
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+    let child = cmd
+        .stdin(Stdio::null())
+        .stdout(log)
+        .stderr(log_err)
         .spawn()
-        .map(|_child| ())
         .map_err(|e| {
             format!(
                 "Couldn't run `{} {sub}`: {e}.\n\
@@ -375,22 +454,143 @@ fn run_cli(sub: &str) -> Result<(), String> {
                  usually fixes this.",
                 bin.display()
             )
-        })
+        })?;
+
+    let status = wait_bounded(child, CLI_TIMEOUT);
+    let output = std::fs::read_to_string(&log_path).unwrap_or_default();
+    let _ = std::fs::remove_file(&log_path);
+
+    match status {
+        Ok(Some(status)) if status.success() => Ok(()),
+        Ok(Some(status)) => Err(format!(
+            "`portzero {sub}` failed ({status}).\n\n{}",
+            cli_says(&output)
+        )),
+        Ok(None) => Err(format!(
+            "`portzero {sub}` did not finish within {}s and was stopped.\n\n{}\n\
+             Run `portzero {sub}` in a terminal to see where it hangs, and \
+             `portzero doctor` for a full diagnosis.",
+            CLI_TIMEOUT.as_secs(),
+            cli_says(&output)
+        )),
+        Err(e) => Err(format!("Couldn't wait for `portzero {sub}`: {e}.")),
+    }
+}
+
+/// Wait for `child` to exit, killing it if it outlives `timeout`.
+///
+/// `Ok(None)` means the timeout was hit and the child was killed. Polling with
+/// `try_wait` rather than blocking on `wait` is what makes the timeout possible
+/// at all; the interval is short enough to feel immediate and long enough to
+/// cost nothing over a 45-second budget.
+fn wait_bounded(
+    mut child: std::process::Child,
+    timeout: Duration,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Quote the CLI's own output for a UI message, or say plainly that it produced
+/// none — an empty quote block reads like the message is broken.
+fn cli_says(output: &str) -> String {
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        "It printed nothing.".to_string()
+    } else {
+        format!("It said:\n{trimmed}")
+    }
+}
+
+/// Check that the daemon reached the state the clicked button promised.
+///
+/// Exit status alone can't do this. `portzero start` prints "Daemon is already
+/// running" and exits 0, and an unprivileged start exits 0 with a daemon that
+/// came up without its overlay — both look like success to the caller while
+/// leaving the app exactly as broken as before the click.
+fn verify_outcome(sub: &str, want_running: bool) -> Result<(), String> {
+    let pid = on_disk_daemon_pid();
+
+    if !want_running {
+        return match pid {
+            None => Ok(()),
+            Some(pid) => Err(format!(
+                "`portzero {sub}` reported success, but the daemon (PID {pid}) is \
+                 still running.\n\n\
+                 If it was installed as a system service it will have been \
+                 restarted automatically. Stop the service instead:\n  \
+                 sudo launchctl bootout system/cloud.portzero.daemon   (macOS)\n  \
+                 sudo systemctl stop portzero                          (Linux)"
+            )),
+        };
+    }
+
+    let Some(pid) = pid else {
+        return Err(format!(
+            "`portzero {sub}` reported success, but no daemon is running.\n\n\
+             Run `portzero {sub}` in a terminal to see why it exited, then \
+             `portzero doctor` for a full diagnosis."
+        ));
+    };
+
+    if overlay_is_active() {
+        return Ok(());
+    }
+
+    Err(format!(
+        "The daemon started (PID {pid}), but its overlay network did not come \
+         up, so *.portzero.local names will not resolve and this app cannot \
+         reach it.\n\n\
+         The usual cause is starting it without administrator privileges — \
+         creating the virtual network device requires them. Run this in a \
+         terminal instead:\n  \
+         sudo portzero restart\n\n\
+         To have it start with privileges at every boot:\n  \
+         sudo portzero setup"
+    ))
+}
+
+/// Whether the daemon has recorded its overlay network as up.
+///
+/// Read from the daemon's own state file rather than probed over the network:
+/// the overlay being *down* is precisely the case this has to detect, and a
+/// probe cannot distinguish "down" from "slow" without a timeout of its own.
+fn overlay_is_active() -> bool {
+    use portzero_daemon::discovery_loop::DaemonConfig;
+    use portzero_daemon::route_table::OverlayState;
+
+    let config = DaemonConfig::load();
+    OverlayState::load(&config.overlay_path())
+        .map(|s| s.overlay_active)
+        .unwrap_or(false)
 }
 
 /// Start the daemon (`portzero start --no-browser`).
 pub fn start_daemon() -> Result<(), String> {
-    run_cli("start")
+    run_cli("start")?;
+    verify_outcome("start", true)
 }
 
 /// Stop the daemon (`portzero stop`).
 pub fn stop_daemon() -> Result<(), String> {
-    run_cli("stop")
+    run_cli("stop")?;
+    verify_outcome("stop", false)
 }
 
 /// Restart the daemon (`portzero restart --no-browser`).
 pub fn restart_daemon() -> Result<(), String> {
-    run_cli("restart")
+    run_cli("restart")?;
+    verify_outcome("restart", true)
 }
 
 /// Open a URL in the user's default browser (best-effort, non-blocking).
@@ -507,9 +707,10 @@ mod tests {
 
     #[test]
     fn fallback_status_is_renderable_and_marks_daemon_down() {
-        let v = fallback_status("connection refused");
+        let v = fallback_status("connection refused", None);
         assert_eq!(v["running"], json!(false));
         assert_eq!(v["reachable"], json!(false));
+        assert_eq!(v["daemon_pid"], Value::Null);
         assert!(v["local_services"].is_array());
         assert!(v["cloud_routes"].is_array());
         assert!(v["problems"].is_array());
@@ -518,7 +719,32 @@ mod tests {
         assert!(v["status_message"]
             .as_str()
             .unwrap()
-            .contains("isn't reachable"));
+            .contains("isn't running"));
+    }
+
+    /// The case that made the app unusable: a daemon started without privileges
+    /// is alive but its overlay never came up, so `10.254.0.2` never answers.
+    /// Reporting that as "not running" put a Start button in front of the user
+    /// that could only ever re-run a command replying "already running".
+    #[test]
+    fn fallback_status_reports_a_live_daemon_whose_overlay_is_down_as_running() {
+        let v = fallback_status("connection timed out", Some(4242));
+        assert_eq!(v["running"], json!(true));
+        assert_eq!(v["daemon_pid"], json!(4242));
+        // Still unreachable — the UI must not render tunnel data it never got.
+        assert_eq!(v["reachable"], json!(false));
+        assert_eq!(v["overlay_active"], json!(false));
+
+        let message = v["status_message"].as_str().unwrap();
+        assert!(message.contains("4242"), "message was: {message}");
+        assert!(
+            message.contains("Restart daemon"),
+            "a running daemon must be pointed at Restart, not Start: {message}"
+        );
+        assert!(
+            message.contains("sudo portzero restart"),
+            "the privileged fix must be spelled out: {message}"
+        );
     }
 
     #[test]

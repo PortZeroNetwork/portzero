@@ -129,21 +129,32 @@ fn emit_frame(app: &AppHandle, id: &str, ev: core::SseEvent) {
 }
 
 /// Start the daemon.
+///
+/// Async + `spawn_blocking` for the same reason as [`get_status`], and more
+/// urgently: these now wait for the CLI to exit instead of firing and forgetting
+/// it, and `restart` legitimately takes seconds. On the Tauri main thread that
+/// would freeze the whole window for the duration.
 #[tauri::command]
-pub fn start_daemon() -> Result<(), String> {
-    core::start_daemon()
+pub async fn start_daemon() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(core::start_daemon)
+        .await
+        .unwrap_or_else(|e| panic!("start_daemon task panicked: {e}"))
 }
 
 /// Stop the daemon.
 #[tauri::command]
-pub fn stop_daemon() -> Result<(), String> {
-    core::stop_daemon()
+pub async fn stop_daemon() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(core::stop_daemon)
+        .await
+        .unwrap_or_else(|e| panic!("stop_daemon task panicked: {e}"))
 }
 
 /// Restart the daemon.
 #[tauri::command]
-pub fn restart_daemon() -> Result<(), String> {
-    core::restart_daemon()
+pub async fn restart_daemon() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(core::restart_daemon)
+        .await
+        .unwrap_or_else(|e| panic!("restart_daemon task panicked: {e}"))
 }
 
 /// Toggle "enable HTTPS for HTTP tunnels".
