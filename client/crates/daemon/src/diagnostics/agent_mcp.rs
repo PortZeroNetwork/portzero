@@ -79,13 +79,24 @@ mod tests {
     use super::*;
 
     fn tmp_home() -> PathBuf {
+        // The pid is identical across these tests (cargo runs them as threads of
+        // one process) and the timestamp is not reliably distinct: macOS clock
+        // resolution is coarse enough that two tests starting together can read
+        // the same value. Colliding on a directory is not a benign name clash —
+        // `already_registered_agent_yields_no_diagnostic` writes a `.claude.json`
+        // containing "portzero", so a test that collided with it read that file
+        // instead of its own, found nothing needing setup, and got `None`.
+        // The counter makes the name unique within the process by construction.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "pz-diag-agent-test-{}-{}",
+            "pz-diag-agent-test-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            seq
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
