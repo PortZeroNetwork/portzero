@@ -11,13 +11,20 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 use crate::engine::{self, Dispatch};
 use crate::icon;
-use crate::menu::{self, MenuModel};
+use crate::menu::{self, MenuModel, MenuSpec};
 use crate::state::Snapshot;
 
 pub struct Controller {
     config: DaemonConfig,
     tray: TrayIcon,
     model: MenuModel,
+    /// The spec the menu currently installed on the tray was rendered from.
+    ///
+    /// Kept so [`Controller::refresh`] can install a new menu *only* when the
+    /// content differs. Handing the platform a menu — even an identical one —
+    /// dismisses whatever the user has open, so an unconditional rebuild every
+    /// tick made the menu close itself a few seconds after every click.
+    spec: MenuSpec,
     /// Whether we've already tried to auto-launch a stopped daemon once this
     /// session, so we don't fight a user who deliberately stopped it.
     auto_started: bool,
@@ -35,7 +42,8 @@ impl Controller {
     pub fn new() -> Result<Self> {
         let config = DaemonConfig::load();
         let snapshot = Snapshot::read(&config);
-        let (menu, model) = menu::to_muda(&menu::build(&snapshot));
+        let spec = menu::build(&snapshot);
+        let (menu, model) = menu::to_muda(&spec);
 
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
@@ -48,6 +56,7 @@ impl Controller {
             config,
             tray,
             model,
+            spec,
             auto_started: false,
         })
     }
@@ -62,13 +71,20 @@ impl Controller {
         crate::welcome::maybe_notify_first_run(&self.config);
     }
 
-    /// Re-read daemon state and rebuild the icon, tooltip, and menu.
+    /// Re-read daemon state and update the icon, tooltip, and menu.
+    ///
+    /// The menu is only reinstalled when its content actually changed. Setting
+    /// the icon and tooltip is invisible to an open menu, but setting the menu
+    /// closes it — so replacing an unchanged menu on every tick meant a user who
+    /// opened the tray had it shut in their face one refresh interval later.
+    /// A snapshot is derived entirely from on-disk daemon state and carries no
+    /// clock, so on a settled machine the rebuilt spec compares equal and the
+    /// menu is left alone indefinitely.
     pub fn refresh(&mut self) {
         // Reload the config each tick so an HTTPS toggle we (or the CLI) wrote to
         // config.toml is reflected, and the state dir stays authoritative.
         self.config = DaemonConfig::load();
         let snapshot = Snapshot::read(&self.config);
-        let (new_menu, new_model) = menu::to_muda(&menu::build(&snapshot));
 
         match health_icon(&snapshot) {
             Ok(ic) => {
@@ -79,8 +95,15 @@ impl Controller {
             Err(e) => tracing::debug!("failed to build tray icon: {e:#}"),
         }
         let _ = self.tray.set_tooltip(Some(&snapshot.summary));
+
+        let spec = menu::build(&snapshot);
+        if spec == self.spec {
+            return;
+        }
+        let (new_menu, new_model) = menu::to_muda(&spec);
         self.tray.set_menu(Some(Box::new(new_menu)));
         self.model = new_model;
+        self.spec = spec;
     }
 
     /// Handle a menu click by its item id. Returns whether the loop should quit.

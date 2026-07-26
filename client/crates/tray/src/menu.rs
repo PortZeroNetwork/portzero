@@ -30,7 +30,10 @@ pub enum Action {
 }
 
 /// One node in the backend-neutral menu tree.
-#[derive(Debug, Clone)]
+///
+/// `PartialEq` is what lets the controller tell a menu that actually changed
+/// from one that merely got rebuilt on a timer — see [`MenuSpec`].
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Node {
     /// A non-interactive, disabled line of text (headers, issues, hints).
     Label(String),
@@ -55,7 +58,12 @@ pub enum Node {
 }
 
 /// The full tray menu tree.
-#[derive(Debug, Clone)]
+///
+/// Comparable on purpose. The tray rebuilds this every refresh tick, but
+/// *installing* a rebuilt menu closes one the user currently has open, so the
+/// controller only hands it to the platform when it differs from the menu
+/// already showing.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MenuSpec {
     pub nodes: Vec<Node>,
 }
@@ -387,5 +395,24 @@ mod tests {
     fn no_tunnels_means_no_cloud_upsell() {
         let spec = build(&snapshot_with(vec![]));
         assert!(!has_cloud_upsell(&tunnels_children(&spec)));
+    }
+
+    /// The controller skips reinstalling the menu when the rebuilt spec equals
+    /// the installed one, which is the only thing stopping the 5-second refresh
+    /// from closing a menu the user has open. That relies on `build` being a
+    /// pure function of the snapshot — the moment it folds in a clock, an
+    /// uptime, or a counter, every tick compares unequal and the menu starts
+    /// slamming shut again.
+    #[test]
+    fn rebuilding_an_unchanged_snapshot_produces_an_equal_spec() {
+        let snapshot = snapshot_with(vec![local("web.myapp.portzero.local")]);
+        assert_eq!(build(&snapshot), build(&snapshot));
+    }
+
+    #[test]
+    fn a_changed_snapshot_produces_a_different_spec() {
+        let before = build(&snapshot_with(vec![]));
+        let after = build(&snapshot_with(vec![local("web.myapp.portzero.local")]));
+        assert_ne!(before, after, "a new tunnel must still reach the menu");
     }
 }
