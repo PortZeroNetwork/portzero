@@ -1,10 +1,22 @@
 //! HTTP client for the portzero.cloud cloud API.
 
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::Serialize;
 
 use crate::auth::AuthConfig;
+
+/// Overall request timeout (connect + send + receive headers/body).
+///
+/// Requests through this client (e.g. `portzero review` uploading a diff)
+/// can be larger/slower than a health probe, so this is more generous than
+/// the short timeouts used elsewhere in the CLI (`wait.rs`, `update.rs`).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Timeout for establishing the TCP/TLS connection.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// HTTP client for the portzero.cloud API with automatic auth injection.
 pub struct ApiClient {
@@ -23,10 +35,16 @@ impl ApiClient {
         let base_url = portzero_domain::endpoints::api_url();
         let auth = AuthConfig::load().ok();
 
+        let client = Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .build()
+            .expect("reqwest client with timeouts should build");
+
         Self {
             base_url,
             auth,
-            client: Client::new(),
+            client,
         }
     }
 
@@ -50,7 +68,9 @@ impl ApiClient {
             format!(
                 "Failed to reach the portzero.cloud API at {url}\n\n\
                  Check your internet connection, or if you are using a custom API URL,\n\
-                 verify that PZ_TUNNEL_API_URL is correct."
+                 verify that PZ_TUNNEL_API_URL is correct. Requests time out after \
+                 {}s.",
+                REQUEST_TIMEOUT.as_secs()
             )
         })?;
 
@@ -70,7 +90,9 @@ impl ApiClient {
             format!(
                 "Failed to reach the portzero.cloud API at {url}\n\n\
                  Check your internet connection, or if you are using a custom API URL,\n\
-                 verify that PZ_TUNNEL_API_URL is correct."
+                 verify that PZ_TUNNEL_API_URL is correct. Requests time out after \
+                 {}s.",
+                REQUEST_TIMEOUT.as_secs()
             )
         })?;
 
