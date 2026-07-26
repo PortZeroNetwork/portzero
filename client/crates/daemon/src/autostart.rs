@@ -278,44 +278,163 @@ fn install_launchd(binary: &std::path::Path) -> Result<()> {
     })?;
 
     // Reload the job if it already exists so launchd picks up the latest plist.
-    let _ = std::process::Command::new("launchctl")
-        .arg("bootout")
-        .arg(format!("system/{}", SERVICE_NAME))
-        .status();
-
-    // Modern launchctl: `bootstrap system <plist>` loads a system daemon
-    // (`load -w` is deprecated for the system domain).
-    let status = std::process::Command::new("launchctl")
-        .args(["bootstrap", "system"])
-        .arg(&plist_path)
-        .status()
-        .context("Failed to run launchctl bootstrap")?;
-
-    if !status.success() {
-        // Already-loaded is the common non-zero case; fall back to the legacy
-        // verb so older systems still load the daemon.
-        tracing::warn!(
-            "launchctl bootstrap returned non-zero; the daemon may already be loaded. \
-             Falling back to legacy `load -w`."
-        );
-        let fallback_status = std::process::Command::new("launchctl")
-            .args(["load", "-w"])
-            .arg(&plist_path)
-            .status()
-            .context("Failed to run launchctl load fallback")?;
-        if !fallback_status.success() {
-            anyhow::bail!(
-                "launchctl could not load the PortZero LaunchDaemon at {}",
-                plist_path.display()
-            );
-        }
-    }
+    bootout_and_wait();
+    bootstrap_launchd(&plist_path)?;
 
     kickstart_launchd()?;
     verify_launchd_loaded()?;
 
     tracing::info!("Installed LaunchDaemon: {}", plist_path.display());
     Ok(())
+}
+
+/// How long to wait for launchd to finish an asynchronous domain operation.
+#[cfg(target_os = "macos")]
+const LAUNCHD_SETTLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Run `launchctl` with `args`, capturing its output.
+#[cfg(target_os = "macos")]
+fn launchctl(args: &[&std::ffi::OsStr]) -> Result<std::process::Output> {
+    std::process::Command::new("launchctl")
+        .args(args)
+        .output()
+        .context("Failed to run launchctl. Is /bin/launchctl present and executable?")
+}
+
+/// The system-domain service target for the daemon (`system/cloud.portzero.daemon`).
+#[cfg(target_os = "macos")]
+fn launchd_service_target() -> String {
+    format!("system/{}", SERVICE_NAME)
+}
+
+/// Whether launchd currently has the daemon loaded in the system domain.
+#[cfg(target_os = "macos")]
+fn launchd_service_loaded() -> bool {
+    use std::ffi::OsStr;
+
+    launchctl(&[OsStr::new("print"), OsStr::new(&launchd_service_target())])
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Boot the service out, then wait until launchd has really torn it down.
+///
+/// `bootout` is asynchronous: it returns once launchd has *accepted* the
+/// request, not once the job is gone. Issuing `bootstrap` inside that window
+/// fails with "Operation already in progress", and because the old code
+/// discarded bootout's result and bootstrapped immediately, that race left the
+/// machine in its worst possible state — a valid, enabled plist on disk with no
+/// service loaded behind it. `portzero autostart status` and every file-existence
+/// check then reported autostart as installed while no privileged daemon existed,
+/// and the unprivileged one the tray starts in its place cannot bring the overlay
+/// up. Waiting here is what makes the following `bootstrap` deterministic.
+#[cfg(target_os = "macos")]
+fn bootout_and_wait() {
+    use std::ffi::OsStr;
+
+    if !launchd_service_loaded() {
+        return;
+    }
+    let target = launchd_service_target();
+    let _ = launchctl(&[OsStr::new("bootout"), OsStr::new(&target)]);
+
+    let deadline = std::time::Instant::now() + LAUNCHD_SETTLE_TIMEOUT;
+    while launchd_service_loaded() {
+        if std::time::Instant::now() >= deadline {
+            tracing::warn!(
+                "launchd still reports {target} as loaded {}s after bootout; \
+                 bootstrapping anyway",
+                LAUNCHD_SETTLE_TIMEOUT.as_secs()
+            );
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// Load the daemon into the system domain, retrying while launchd is still busy.
+///
+/// Every failure path reports what `launchctl` actually said. The previous
+/// message named only the plist path, so the one diagnostic that explains a
+/// failed install — launchd's own errno and text — was discarded exactly when
+/// it was needed.
+#[cfg(target_os = "macos")]
+fn bootstrap_launchd(plist_path: &std::path::Path) -> Result<()> {
+    use std::ffi::OsStr;
+
+    let deadline = std::time::Instant::now() + LAUNCHD_SETTLE_TIMEOUT;
+    let mut last_error;
+    loop {
+        let out = launchctl(&[
+            OsStr::new("bootstrap"),
+            OsStr::new("system"),
+            plist_path.as_os_str(),
+        ])?;
+        // Treat "loaded" as success regardless of exit status: bootstrap reports
+        // an already-loaded service as an error, which is not one for us.
+        if out.status.success() || launchd_service_loaded() {
+            return Ok(());
+        }
+        last_error = describe_launchctl(&out);
+        if !launchd_is_busy(&last_error) || std::time::Instant::now() >= deadline {
+            break;
+        }
+        tracing::debug!("launchctl bootstrap is still busy ({last_error}); retrying");
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+
+    // Fall back to the legacy verb so older systems still load the daemon.
+    tracing::warn!("launchctl bootstrap failed ({last_error}); trying legacy `load -w`");
+    let fallback = launchctl(&[OsStr::new("load"), OsStr::new("-w"), plist_path.as_os_str()])?;
+    if fallback.status.success() || launchd_service_loaded() {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "launchd would not load the PortZero daemon from {path}.\n\n\
+         `launchctl bootstrap system` said: {last_error}\n\
+         `launchctl load -w` said: {fallback}\n\n\
+         The plist itself is written and valid — only loading it failed, so the \
+         daemon will not start at boot and any daemon you start by hand will run \
+         without the privileges its overlay network needs.\n\n\
+         Things that cause this:\n  \
+         - the service is disabled in launchd's override database; re-enable it \
+         with `sudo launchctl enable {target}`\n  \
+         - a previous copy is still shutting down; wait a few seconds and re-run \
+         `sudo portzero autostart enable`\n  \
+         - the plist is not owned by root:wheel; fix with `sudo chown root:wheel \
+         {path}`\n\n\
+         Verify the plist with `plutil -lint {path}` and inspect launchd's view \
+         with `sudo launchctl print {target}`.",
+        path = plist_path.display(),
+        target = launchd_service_target(),
+        last_error = last_error,
+        fallback = describe_launchctl(&fallback),
+    )
+}
+
+/// One-line rendering of a failed `launchctl` invocation, for error messages.
+#[cfg(target_os = "macos")]
+fn describe_launchctl(out: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let text = format!("{} {}", stderr.trim(), stdout.trim());
+    let text = text.trim();
+    if text.is_empty() {
+        format!("exited with {} and printed nothing", out.status)
+    } else {
+        text.to_string()
+    }
+}
+
+/// Whether launchctl failed because another domain operation is still running.
+///
+/// launchd reports these as errno 36 ("Operation now in progress") and 37
+/// ("Operation already in progress"). They are the retryable failures — every
+/// other one will fail identically no matter how long we wait.
+#[cfg(target_os = "macos")]
+fn launchd_is_busy(message: &str) -> bool {
+    message.contains("in progress")
 }
 
 #[cfg(target_os = "macos")]
@@ -594,6 +713,40 @@ mod tests {
         assert!(!path.to_string_lossy().contains("LaunchAgents"));
         assert!(path.to_string_lossy().contains(SERVICE_NAME));
         assert!(path.to_string_lossy().ends_with(".plist"));
+    }
+
+    /// The bootstrap retry loop only kicks in for launchd's asynchronous
+    /// "another operation is running" failures. Retrying anything else just
+    /// delays a permanent error by the full settle timeout.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn launchd_busy_errors_are_the_only_retryable_ones() {
+        assert!(launchd_is_busy(
+            "Bootstrap failed: 37: Operation already in progress"
+        ));
+        assert!(launchd_is_busy(
+            "Boot-out failed: 36: Operation now in progress"
+        ));
+
+        assert!(!launchd_is_busy("Bootstrap failed: 5: Input/output error"));
+        assert!(!launchd_is_busy(
+            "Load failed: 1: Operation not permitted while System Integrity Protection is engaged"
+        ));
+    }
+
+    /// A launchctl failure that printed nothing must still say something — the
+    /// point of capturing its output is that the user sees a reason.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn silent_launchctl_failures_still_describe_themselves() {
+        let out = std::process::Command::new("/usr/bin/false")
+            .output()
+            .expect("/usr/bin/false should run");
+        let described = describe_launchctl(&out);
+        assert!(
+            described.contains("printed nothing"),
+            "described was: {described}"
+        );
     }
 
     #[cfg(target_os = "macos")]
