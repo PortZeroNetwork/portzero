@@ -21,26 +21,42 @@ const EVENT_END: &str = "example://end";
 /// Fetch daemon status (or a daemon-down fallback). Never errors — the UI always
 /// gets a renderable object.
 #[tauri::command]
-pub fn get_status() -> Value {
-    core::get_status()
+pub async fn get_status() -> Value {
+    // Daemon I/O must never run on the Tauri main thread: a blocking
+    // command holds the UI for the whole round trip.
+    tauri::async_runtime::spawn_blocking(move || core::get_status())
+        .await
+        .unwrap_or_else(|e| panic!("get_status task panicked: {e}"))
 }
 
 /// Download-state + running-example ids.
 #[tauri::command]
-pub fn examples_status() -> Result<Value, String> {
-    core::examples_status()
+pub async fn examples_status() -> Result<Value, String> {
+    // Daemon I/O must never run on the Tauri main thread: a blocking
+    // command holds the UI for the whole round trip.
+    tauri::async_runtime::spawn_blocking(move || core::examples_status())
+        .await
+        .unwrap_or_else(|e| panic!("examples_status task panicked: {e}"))
 }
 
 /// Clone/update the examples repo.
 #[tauri::command]
-pub fn download_examples() -> Result<Value, String> {
-    core::download_examples()
+pub async fn download_examples() -> Result<Value, String> {
+    // Daemon I/O must never run on the Tauri main thread: a blocking
+    // command holds the UI for the whole round trip.
+    tauri::async_runtime::spawn_blocking(move || core::download_examples())
+        .await
+        .unwrap_or_else(|e| panic!("download_examples task panicked: {e}"))
 }
 
 /// Stop a running example.
 #[tauri::command]
-pub fn stop_example(id: String) -> Result<Value, String> {
-    core::stop_example(&id)
+pub async fn stop_example(id: String) -> Result<Value, String> {
+    // Daemon I/O must never run on the Tauri main thread: a blocking
+    // command holds the UI for the whole round trip.
+    tauri::async_runtime::spawn_blocking(move || core::stop_example(&id))
+        .await
+        .unwrap_or_else(|e| panic!("stop_example task panicked: {e}"))
 }
 
 /// Start an example and stream its output to the UI.
@@ -146,6 +162,10 @@ pub fn open_external(url: String) -> Result<(), String> {
 /// Never errors — a component whose version can't be read is reported as
 /// unknown rather than failing the whole panel.
 #[tauri::command]
-pub fn get_versions() -> Value {
-    core::get_versions()
+pub async fn get_versions() -> Value {
+    // Daemon I/O must never run on the Tauri main thread: a blocking
+    // command holds the UI for the whole round trip.
+    tauri::async_runtime::spawn_blocking(move || core::get_versions())
+        .await
+        .unwrap_or_else(|e| panic!("get_versions task panicked: {e}"))
 }

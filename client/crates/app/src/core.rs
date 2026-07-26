@@ -25,18 +25,29 @@ pub const LOCAL_BASE: &str = "http://portzero.local";
 /// CLI report.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Build a blocking HTTP client scoped to the local daemon.
+/// The one blocking HTTP client the app uses, built once.
 ///
-/// `no_proxy()` is essential: the app may run in an environment with an
-/// `HTTPS_PROXY`/`HTTP_PROXY` set, and routing a request for the loopback
-/// overlay name `portzero.local` through an external proxy would always fail.
-/// Timeouts are deliberately short — this is a localhost round-trip, and a slow
-/// or absent daemon should surface as "daemon down" quickly rather than hang the
-/// UI.
-fn client(timeout: Duration) -> Result<reqwest::blocking::Client, String> {
-    reqwest::blocking::Client::builder()
+/// It must be shared, not per-call. `reqwest::blocking::Client` owns a private
+/// tokio runtime on its own thread, and **dropping one blocks until that thread
+/// joins**. Building a client per request therefore paid a thread spawn *and* a
+/// `pthread_join` on every call — and because these commands run on the Tauri
+/// main thread, that join froze the UI. A sample of the app mid-freeze put 92%
+/// of main-thread time in `InnerClientHandle::drop_slow → thread::join`, not in
+/// the request itself. Reusing one client removes that cost entirely.
+///
+/// `no_proxy()` is essential: the app may run with `HTTPS_PROXY`/`HTTP_PROXY`
+/// set, and routing a loopback overlay request through an external proxy would
+/// always fail. Per-request timeouts are applied at the call site with
+/// `RequestBuilder::timeout`, so one shared client still serves callers that
+/// need very different budgets.
+static CLIENT: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
+
+fn client() -> Result<&'static reqwest::blocking::Client, String> {
+    if let Some(c) = CLIENT.get() {
+        return Ok(c);
+    }
+    let built = reqwest::blocking::Client::builder()
         .no_proxy()
-        .timeout(timeout)
         .connect_timeout(Duration::from_millis(700))
         .build()
         .map_err(|e| {
@@ -45,7 +56,40 @@ fn client(timeout: Duration) -> Result<reqwest::blocking::Client, String> {
                  This is unexpected — please restart the PortZero app, and if it \
                  keeps happening, report it with this message."
             )
-        })
+        })?;
+    Ok(CLIENT.get_or_init(|| built))
+}
+
+/// Base URL for daemon requests.
+///
+/// Uses the overlay's fixed gateway IP rather than `LOCAL_BASE`'s
+/// `portzero.local`. On macOS, mDNSResponder claims every `.local` name before
+/// the scoped resolver is consulted, so `getaddrinfo("portzero.local")` can
+/// stall for seconds — on the UI thread, per poll — even when the daemon is
+/// serving normally. `connect_timeout` does not reliably bound name resolution,
+/// so the only dependable fix is not to resolve. Requests carry an explicit
+/// `Host` header so the daemon still routes them as before.
+const DAEMON_ADDR: &str = "http://10.254.0.2";
+const DAEMON_HOST: &str = "portzero.local";
+
+/// A GET against the local daemon with the given budget, bypassing DNS.
+fn daemon_get(path: &str, timeout: Duration) -> Result<reqwest::blocking::Response, String> {
+    client()?
+        .get(format!("{DAEMON_ADDR}{path}"))
+        .header("Host", DAEMON_HOST)
+        .timeout(timeout)
+        .send()
+        .map_err(|e| e.to_string())
+}
+
+/// A POST against the local daemon with the given budget, bypassing DNS.
+fn daemon_post(path: &str, timeout: Duration) -> Result<reqwest::blocking::Response, String> {
+    client()?
+        .post(format!("{DAEMON_ADDR}{path}"))
+        .header("Host", DAEMON_HOST)
+        .timeout(timeout)
+        .send()
+        .map_err(|e| e.to_string())
 }
 
 /// Fetch `/status.json` and return it enriched with a `running` flag, or a
@@ -56,15 +100,12 @@ fn client(timeout: Duration) -> Result<reqwest::blocking::Client, String> {
 /// whose overlay isn't routing `portzero.local` yet is still reported as
 /// running — the UI then offers Restart rather than Start.
 pub fn get_status() -> Value {
-    let url = format!("{LOCAL_BASE}/status.json");
-    match client(Duration::from_millis(1200)).and_then(|c| {
-        c.get(&url).send().map_err(|e| e.to_string()).and_then(|r| {
-            if r.status().is_success() {
-                r.json::<Value>().map_err(|e| e.to_string())
-            } else {
-                Err(format!("daemon returned HTTP {}", r.status().as_u16()))
-            }
-        })
+    match daemon_get("/status.json", Duration::from_millis(1200)).and_then(|r| {
+        if r.status().is_success() {
+            r.json::<Value>().map_err(|e| e.to_string())
+        } else {
+            Err(format!("daemon returned HTTP {}", r.status().as_u16()))
+        }
     }) {
         Ok(mut v) => {
             let running = v.get("daemon_pid").map(|p| !p.is_null()).unwrap_or(false);
@@ -127,11 +168,7 @@ pub fn stop_example(id: &str) -> Result<Value, String> {
     let path = format!("/v1/examples/stop?id={}", urlencode(id));
     // The stop endpoint returns an empty body with a status code; treat any 2xx
     // as success and surface a clear message otherwise.
-    let url = format!("{LOCAL_BASE}{path}");
-    let resp = client(Duration::from_secs(15))?
-        .post(&url)
-        .send()
-        .map_err(|e| daemon_unreachable(&e.to_string()))?;
+    let resp = daemon_post(&path, Duration::from_secs(15)).map_err(|e| daemon_unreachable(&e))?;
     if resp.status().is_success() {
         Ok(json!({ "ok": true }))
     } else {
@@ -145,21 +182,13 @@ pub fn stop_example(id: &str) -> Result<Value, String> {
 
 /// GET a daemon endpoint and parse its JSON body.
 fn get_json(path: &str, timeout: Duration) -> Result<Value, String> {
-    let url = format!("{LOCAL_BASE}{path}");
-    let resp = client(timeout)?
-        .get(&url)
-        .send()
-        .map_err(|e| daemon_unreachable(&e.to_string()))?;
+    let resp = daemon_get(path, timeout).map_err(|e| daemon_unreachable(&e))?;
     parse_json_response(resp)
 }
 
 /// POST a daemon endpoint and parse its JSON body.
 fn post_json(path: &str, timeout: Duration) -> Result<Value, String> {
-    let url = format!("{LOCAL_BASE}{path}");
-    let resp = client(timeout)?
-        .post(&url)
-        .send()
-        .map_err(|e| daemon_unreachable(&e.to_string()))?;
+    let resp = daemon_post(path, timeout).map_err(|e| daemon_unreachable(&e))?;
     parse_json_response(resp)
 }
 
