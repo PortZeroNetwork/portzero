@@ -4,15 +4,17 @@ name: VM E2E (Parallels)
 # installers, real trust stores, real TUN/wintun adapters, driven end to end
 # on genuine Windows/Linux/macOS guests. See vmtest/README.md.
 #
-# windows/linux binaries are built on hosted runners (build-windows,
-# build-linux below) and pushed into the guests, so vm-test always exercises
-# the commit under test — not whatever was last baked into a VM's "built"
-# snapshot by hand. macOS builds directly on the self-hosted runner (which
-# already runs macOS) and pushes its own binary in; see ./vmkit.conf.
+# windows/linux/macOS binaries are all built on hosted runners (build-windows,
+# build-linux, build-macos below) and pushed into the guests, so vm-test
+# always exercises the commit under test — not whatever was last baked into a
+# VM's "built" snapshot by hand. The org's one self-hosted macOS runner is the
+# bottleneck (it also hosts the Parallels VMs and serializes every vm-test
+# matrix leg), so every build that a GitHub-hosted runner can do instead stays
+# off it; only the vmkit-driven guest steps run there. See ./vmkit.conf.
 #
-# Runs on the org's one self-hosted macOS runner, which also hosts the
-# Parallels VMs under test. vm-test stops any other running VM on the host
-# (one-VM-at-a-time enforcement) and reuses this one Mac's Parallels
+# vm-test itself still runs on the org's one self-hosted macOS runner (it
+# hosts the Parallels VMs under test). vm-test stops any other running VM on
+# the host (one-VM-at-a-time enforcement) and reuses this one Mac's Parallels
 # install, so it isn't free of side effects on a machine also used
 # interactively — acceptable for this org's workflow, worth knowing if that
 # changes.
@@ -69,6 +71,31 @@ jobs:
         with:
           name: portzero-linux
           path: target/release/portzero
+          retention-days: 1
+
+  build-macos:
+    name: Build macos binary
+    # Built here (GitHub-hosted, Apple Silicon) instead of on the self-hosted
+    # runner inside vm-test: it's a plain `cargo build`, needs no vmkit/
+    # Parallels access, and every minute it doesn't spend on the org's one
+    # self-hosted macOS runner is a minute that runner has free for the guest
+    # tests that actually require it. portzero-tray is built alongside
+    # portzero so lifecycle-macos.sh / combined-macos.sh have a real tray
+    # binary to stage (see VMKIT_ARTIFACT_MACOS / PORTZERO_TRAY_EXE in
+    # ./vmkit.conf) — same pair the self-hosted job used to build.
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --bin portzero --bin portzero-tray
+      - uses: actions/upload-artifact@v5
+        with:
+          name: portzero-macos
+          path: |
+            target/release/portzero
+            target/release/portzero-tray
           retention-days: 1
 
   # Real installable artifacts for the lifecycle test (install -> verify ->
@@ -199,7 +226,7 @@ jobs:
 
   vm-test:
     name: vm-test (${{ matrix.platform }})
-    needs: [build-windows, build-linux, package-linux-deb, package-windows-msi]
+    needs: [build-windows, build-linux, build-macos, package-linux-deb, package-windows-msi]
     runs-on: [self-hosted, macOS]
     timeout-minutes: 75
     strategy:
@@ -213,12 +240,12 @@ jobs:
         platform: [windows, linux, macos]
     steps:
       - uses: actions/checkout@v5
-        # This runner is persistent, so its disk IS the build cache: keep the
-        # workspace `target/` and `~/.cargo` between runs instead of wiping
-        # them. `git clean -ffdx` (the checkout default) would delete `target/`
-        # and force a cold rebuild + crate re-download every run.
-        with:
-          clean: false
+        # `clean: false` used to matter here so target/ and ~/.cargo — the
+        # build cache for the cargo build this job used to run directly on
+        # the persistent self-hosted runner — survived between runs. That
+        # build is gone (build-macos above does it on a hosted runner
+        # instead), so there is nothing left to preserve; a plain clean
+        # checkout is simpler and can't accumulate stale cruft across runs.
 
       - name: Ensure vmkit (VM control plane) is installed
         # The harness runs through vmkit (see ./vmkit.conf and
@@ -229,29 +256,33 @@ jobs:
           command -v vmkit >/dev/null || brew install portzeronetwork/portzero/vmkit
           vmkit version
 
-      - uses: dtolnay/rust-toolchain@stable
+      # No rust toolchain / cargo here: every binary under test (windows,
+      # linux, macos) is now built on a GitHub-hosted runner (build-windows,
+      # build-linux, build-macos above) and downloaded below. That keeps the
+      # only thing this job compiles-in-place at zero, so the org's one
+      # self-hosted macOS runner spends its time on vmkit/Parallels guest work
+      # — the thing only it can do — not on cargo builds a hosted runner could
+      # do just as well.
 
-      # NO Swatinem/rust-cache here: this job runs on the persistent
-      # self-hosted runner, whose target/ and ~/.cargo already survive between
-      # runs locally. The remote cache added nothing on restore and its
-      # post-job SAVE uploaded a multi-GB target dir over the runner's
-      # residential uplink — 39+ minutes, blowing the 45-minute job timeout
-      # AFTER every test had passed (run 29200942798).
-
-      - name: Build macOS binary
+      - name: Download macOS binary
         # macOS guest testing is host-built-artifact-only (no toolchain in
         # that guest); vmkit pushes this into the guest itself (see
         # VMKIT_ARTIFACT_MACOS in ./vmkit.conf). Only the macos leg needs this.
-        # portzero-tray is built alongside portzero so the tray/LaunchAgent
+        # portzero-tray comes down alongside portzero so the tray/LaunchAgent
         # checks in lifecycle-macos.sh / combined-macos.sh have a real binary
         # to stage into the generated Homebrew formula (PORTZERO_TRAY_EXE
         # defaults to this sibling path when unset).
         if: matrix.platform == 'macos'
-        # portzero-tray lives in its own workspace crate (not a bin inside
-        # portzero-cli), so this can't stay scoped with -p portzero-cli —
-        # same unscoped --bin pattern package-linux-deb / package-windows-msi
-        # already use to build both.
-        run: cargo build --release --bin portzero --bin portzero-tray
+        uses: actions/download-artifact@v5
+        with:
+          name: portzero-macos
+          path: target/release
+
+      - name: Restore exec bit on the macOS binaries
+        # download-artifact doesn't preserve the exec bit (same as the linux
+        # binary below).
+        if: matrix.platform == 'macos'
+        run: chmod +x target/release/portzero target/release/portzero-tray
 
       - name: Download windows binary
         if: matrix.platform == 'windows'
