@@ -113,11 +113,49 @@ SELECT `Value` FROM `Property` WHERE `Property`='ProductVersion'
 function Install-Msi {
     param([string] $Path, [string] $LogName)
     $log = Join-Path $env:TEMP $LogName
-    return Invoke-Guarded -Label "msiexec-$LogName" -TimeoutSec 180 -ArgList @($Path, $log) -Script {
+
+    # Always install from a guest-local copy. The MSI normally arrives over the
+    # Parallels shared folder (\\Mac\Home\...), and msiexec runs its install
+    # service as LOCAL SYSTEM, which has no access to the share mapped for the
+    # interactive user — so installing in place fails with a bare non-zero exit
+    # code that looks exactly like a broken package. Copying first costs a
+    # second and takes the host filesystem out of what this test measures.
+    $local = Join-Path $env:TEMP ([System.IO.Path]::GetFileName($Path))
+    try {
+        Copy-Item -LiteralPath $Path -Destination $local -Force -ErrorAction Stop
+    } catch {
+        "WARN=msi-copy-failed src=$Path err=$($_.Exception.Message)"
+        $local = $Path
+    }
+
+    $raw = Invoke-Guarded -Label "msiexec-$LogName" -TimeoutSec 180 -ArgList @($local, $log) -Script {
         param($msiPath, $logPath)
         $p = Start-Process msiexec.exe -ArgumentList @('/i', "`"$msiPath`"", '/qn', '/norestart', '/l*v', "`"$logPath`"") -Wait -PassThru
-        return $p.ExitCode -eq 0
+        return $p.ExitCode
     }
+
+    # Invoke-Guarded emits its WARN line into the pipeline before returning, so
+    # on timeout the caller receives @('WARN=...', $false), not a bare $false —
+    # and a 2-element array casts to $true, which would have reported a wedged
+    # install as a passing one. Take the last emitted value, which is the
+    # scriptblock's return in both paths.
+    $code = if ($raw -is [array]) { $raw[-1] } else { $raw }
+
+    if ($code -is [int] -and $code -eq 0) { return $true }
+
+    # A bare `ok=false` gives whoever reads this run nothing to act on. Surface
+    # the msiexec exit code and the last of its verbose log, which is where the
+    # actual reason (blocked path, failed custom action, missing dependency)
+    # always is.
+    "WARN=msiexec-exit code=$code msi=$local"
+    if (Test-Path $log) {
+        "WARN=msiexec-log-tail ---"
+        Get-Content $log -Tail 25 -ErrorAction SilentlyContinue
+        "WARN=msiexec-log-end ---"
+    } else {
+        "WARN=msiexec-log-missing path=$log"
+    }
+    return $false
 }
 
 # Poll until the daemon (started by the MSI custom action) brings the overlay up.
