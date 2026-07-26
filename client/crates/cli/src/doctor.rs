@@ -29,6 +29,10 @@ use portzero_daemon::tls::{trust, LocalCa};
 
 use crate::auth::AuthConfig;
 
+mod overlay;
+
+pub(crate) use overlay::check_overlay_active;
+
 /// The dashboard name, pinned to a fixed VIP; the embedded DNS answers it
 /// directly (before any service registration), so it doubles as a synthetic DNS
 /// probe.
@@ -223,57 +227,6 @@ fn check_daemon_running(config: &DaemonConfig, pid: Option<u32>) -> Check {
                 "portzero start",
             ),
         },
-    }
-}
-
-/// Is the overlay network actually active? This is the launch-blocking case:
-/// the daemon can report "running" while the overlay never came up (started
-/// unprivileged, or startup wedged), so `.portzero.local` names never resolve.
-///
-/// `overlay_active` in `overlay.json` is written `true` only after the daemon
-/// successfully creates the TUN device (which needs root / CAP_NET_ADMIN), so it
-/// is the authoritative signal for this failure mode.
-pub(crate) fn check_overlay_active(pid: Option<u32>, overlay: &OverlayState) -> Check {
-    if pid.is_none() {
-        return Check::fail(
-            "overlay active",
-            "overlay inactive — the daemon is not running",
-            "portzero start",
-        );
-    }
-
-    if overlay.overlay_active {
-        Check::pass(
-            "overlay active",
-            "TUN device up, virtual IPs served in 10.254.0.0/16 (gateway 10.254.0.1)",
-        )
-    } else {
-        Check::fail(
-            "overlay active",
-            "daemon was started without root/CAP_NET_ADMIN and .portzero.local names will not resolve",
-            overlay_fix_hint(),
-        )
-    }
-}
-
-/// Per-platform command to bring the overlay up with the required privileges.
-fn overlay_fix_hint() -> String {
-    #[cfg(target_os = "macos")]
-    {
-        "sudo portzero autostart enable".to_string()
-    }
-    #[cfg(target_os = "linux")]
-    {
-        "sudo setcap 'cap_net_admin,cap_net_bind_service+eip' $(which portzero), then restart the daemon".to_string()
-    }
-    #[cfg(target_os = "windows")]
-    {
-        "run the daemon as Administrator and ensure wintun.dll sits next to portzero.exe"
-            .to_string()
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        "start the daemon with privileges to create a TUN device".to_string()
     }
 }
 
