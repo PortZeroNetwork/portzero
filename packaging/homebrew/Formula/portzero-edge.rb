@@ -5,7 +5,7 @@ class PortzeroEdge < Formula
   # tap from packaging/homebrew/Formula/portzero-edge.rb and fills in the
   # version + sha256 on each prerelease. See docs/dev/prerelease-channel.md.
   desc "Prerelease (edge) build of portzero — for testing only"
-  homepage "https://portzero.cloud"
+  homepage "https://portzero.net"
   version "0.0.0"
   license "GPL-3.0-or-later"
 

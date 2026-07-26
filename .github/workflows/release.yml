@@ -1185,8 +1185,10 @@ jobs:
           pattern: sha256-portzero-darwin-*
           merge-multiple: true
 
-      - name: Checkout portzero (unstable formula template)
-        if: ${{ needs.version.outputs.prerelease == 'true' }}
+      # Both channels seed their formula from an in-repo template now, so this
+      # checkout is unconditional (it used to be prerelease-only, which is why
+      # the stable formula was never seeded and drifted from the release).
+      - name: Checkout portzero (formula templates)
         uses: actions/checkout@v5
         with:
           path: src
@@ -1208,12 +1210,22 @@ jobs:
 
           TARGET="tap/Formula/${FORMULA}.rb"
 
-          if [ "${FORMULA}" = "portzero-edge" ]; then
-            # Seed the unstable formula (still named portzero-edge) from the in-repo template (single source of
-            # truth for its shape) so the tap does not have to carry it by hand.
-            mkdir -p tap/Formula
-            cp "src/packaging/homebrew/Formula/portzero-edge.rb" "$TARGET"
+          # Seed BOTH formulas from their in-repo templates, which are the single
+          # source of truth for formula *shape* (what gets installed, post_install,
+          # caveats) exactly as this repo builds it. Only the unstable formula used
+          # to be seeded; the stable one was whatever a human last committed to the
+          # tap, and it drifted badly: the release tarball ships `portzero`,
+          # `portzero-tray` and `portzero-app`, but the tap's stable formula did
+          # only `bin.install "portzero"`. Everyone who followed the documented
+          # `brew install portzero` got no tray icon and no desktop app, and the
+          # CLI told them to run a `portzero-app` that was never installed.
+          TEMPLATE="src/packaging/homebrew/Formula/${FORMULA}.rb"
+          if [ ! -f "$TEMPLATE" ]; then
+            echo "::error::No in-repo template at ${TEMPLATE}. Every published formula must have one so the tap cannot drift from what this release ships." >&2
+            exit 1
           fi
+          mkdir -p tap/Formula
+          cp "$TEMPLATE" "$TARGET"
 
           sed -i "s/version \"[^\"]*\"/version \"${VERSION}\"/" "$TARGET"
           sed -i "s/sha256 \"[^\"]*\" # arm64/sha256 \"${AARCH64_SHA256}\" # arm64/" "$TARGET"

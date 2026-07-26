@@ -1,6 +1,6 @@
 class Portzero < Formula
   desc "Eliminate port conflicts in local dev environments with virtual NIC port forwarding"
-  homepage "https://portzero.cloud"
+  homepage "https://portzero.net"
   version "0.1.0"
   license "GPL-3.0-or-later"
 
