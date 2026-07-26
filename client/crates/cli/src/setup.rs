@@ -57,6 +57,14 @@ pub async fn run() -> Result<()> {
         failures.push(("pin the dashboard /etc/hosts entry", err));
     }
 
+    #[cfg(target_os = "macos")]
+    {
+        println!("Installing the system-tray companion...");
+        if let Err(err) = install_tray_agent() {
+            failures.push(("install the system-tray login agent", err));
+        }
+    }
+
     println!("Restoring ownership of your PortZero directories...");
     if let Err(err) = restore_user_ownership() {
         failures.push(("restore ownership of your PortZero directories", err));
@@ -146,6 +154,113 @@ async fn wait_and_open_app() {
          open the PortZero app from your applications menu or run `portzero start`.",
         OVERALL_DEADLINE.as_secs()
     );
+}
+
+/// Install the per-user LaunchAgent that starts `portzero-tray` at login.
+///
+/// This has to happen here rather than in the Homebrew formula's
+/// `post_install`. Homebrew runs `post_install` with `HOME` pointed at a
+/// throwaway temp directory, so a formula that writes
+/// `~/Library/LaunchAgents/...` silently deposits it in
+/// `/private/tmp/portzero-postinstall-*/Library/LaunchAgents/` and brew then
+/// deletes it. The formula looked correct and shipped nothing: no tray icon
+/// ever appeared for anyone who installed via brew.
+///
+/// Setup runs as root under `sudo`, so the plist is written into the *real*
+/// user's home, chowned to them, and bootstrapped into their GUI session —
+/// `launchctl load` as root would target root's session, where there is no GUI.
+#[cfg(target_os = "macos")]
+fn install_tray_agent() -> Result<()> {
+    const LABEL: &str = "cloud.portzero.tray";
+
+    let Some((user, home)) = sudo_invoker() else {
+        // Running unprivileged: the current user *is* the target user.
+        let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
+        return install_tray_agent_for(&home, None, LABEL);
+    };
+    install_tray_agent_for(&home, Some(&user), LABEL)
+}
+
+#[cfg(target_os = "macos")]
+fn install_tray_agent_for(
+    home: &std::path::Path,
+    chown_to: Option<&str>,
+    label: &str,
+) -> Result<()> {
+    // The tray ships beside this binary in every package we build.
+    let tray = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("portzero-tray")))
+        .filter(|p| p.exists());
+    let Some(tray) = tray else {
+        println!("No portzero-tray binary alongside this one; skipping the tray agent.");
+        return Ok(());
+    };
+
+    let agents_dir = home.join("Library/LaunchAgents");
+    std::fs::create_dir_all(&agents_dir)
+        .with_context(|| format!("could not create {}", agents_dir.display()))?;
+    let plist_path = agents_dir.join(format!("{label}.plist"));
+
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>{label}</string>
+  <key>ProgramArguments</key>
+  <array><string>{}</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict></plist>
+"#,
+        tray.display()
+    );
+    std::fs::write(&plist_path, plist)
+        .with_context(|| format!("could not write {}", plist_path.display()))?;
+
+    if let Some(user) = chown_to {
+        let _ = std::process::Command::new("chown")
+            .arg(format!("{user}:"))
+            .arg(&plist_path)
+            .status();
+    }
+
+    // Bootstrap into the target user's GUI domain. Root's own launchctl session
+    // has no GUI, so `launchctl load` here would load it nowhere useful.
+    if let Some(uid) = target_uid(chown_to) {
+        let domain = format!("gui/{uid}");
+        // Replace any previous copy; ignore the "not loaded" error on first run.
+        let _ = std::process::Command::new("launchctl")
+            .args(["bootout", &format!("{domain}/{label}")])
+            .status();
+        let status = std::process::Command::new("launchctl")
+            .args(["bootstrap", &domain])
+            .arg(&plist_path)
+            .status();
+        match status {
+            Ok(s) if s.success() => println!("System-tray companion installed and started."),
+            _ => println!(
+                "Tray agent written to {}. It will start at your next login \
+                 (or run `launchctl bootstrap gui/{uid} {}`).",
+                plist_path.display(),
+                plist_path.display()
+            ),
+        }
+    } else {
+        println!("Tray agent written to {}.", plist_path.display());
+    }
+    Ok(())
+}
+
+/// UID of the user whose GUI session should own the tray.
+#[cfg(target_os = "macos")]
+fn target_uid(user: Option<&str>) -> Option<u32> {
+    let out = match user {
+        Some(u) => std::process::Command::new("id").args(["-u", u]).output(),
+        None => std::process::Command::new("id").arg("-u").output(),
+    }
+    .ok()?;
+    String::from_utf8(out.stdout).ok()?.trim().parse().ok()
 }
 
 /// Give the invoking user back ownership of the directories setup just wrote.

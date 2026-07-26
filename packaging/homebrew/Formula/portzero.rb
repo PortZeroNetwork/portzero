@@ -25,33 +25,13 @@ class Portzero < Formula
     bin.install "portzero-app" if File.exist?("portzero-app")
   end
 
-  def post_install
-    # Generate the local CA certificate (writes to ~/Library/Application Support/PortZero/).
-    # Idempotent — existing certs are kept. Does not require elevated privileges.
-    system "#{bin}/portzero", "trust", "generate"
-
-    # Install a per-user LaunchAgent so the tray starts at login. Best-effort:
-    # never fail the install, and only load it if a GUI session is present.
-    return unless File.exist?("#{opt_bin}/portzero-tray")
-
-    require "fileutils"
-    agents_dir = File.expand_path("~/Library/LaunchAgents")
-    plist_path = "#{agents_dir}/cloud.portzero.tray.plist"
-    FileUtils.mkdir_p(agents_dir)
-    File.write(plist_path, <<~PLIST)
-      <?xml version="1.0" encoding="UTF-8"?>
-      <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-      <plist version="1.0"><dict>
-        <key>Label</key><string>cloud.portzero.tray</string>
-        <key>ProgramArguments</key>
-        <array><string>#{opt_bin}/portzero-tray</string></array>
-        <key>RunAtLoad</key><true/>
-        <key>KeepAlive</key><true/>
-      </dict></plist>
-    PLIST
-    quiet_system "/bin/launchctl", "unload", plist_path
-    quiet_system "/bin/launchctl", "load", plist_path
-  end
+  # No post_install hook on purpose. Homebrew runs post_install with HOME
+  # pointed at a throwaway temp directory, so anything written to
+  # ~/Library/LaunchAgents or ~/Library/Application Support lands in
+  # /private/tmp/portzero-postinstall-*/ and is deleted with it. A formula that
+  # generated the CA and installed the tray login agent here looked correct and
+  # shipped neither. Both now happen in `sudo portzero setup`, which runs as the
+  # real user with a real HOME.
 
   def caveats
     <<~EOS
@@ -81,10 +61,11 @@ class Portzero < Formula
       Once done, open http://portzero.local in your browser and run an example
       from the Getting Started section.
 
-      A system-tray companion (portzero-tray) is installed and set to start at
-      login via ~/Library/LaunchAgents/cloud.portzero.tray.plist. It shows
-      daemon/tunnel health and offers start/restart/stop controls. To stop it:
-        launchctl unload ~/Library/LaunchAgents/cloud.portzero.tray.plist
+      A system-tray companion (portzero-tray) ships with this formula. It shows
+      daemon/tunnel health and offers start/restart/stop controls. `sudo portzero
+      setup` registers it to start at login via
+      ~/Library/LaunchAgents/cloud.portzero.tray.plist. To stop it:
+        launchctl bootout gui/$(id -u)/cloud.portzero.tray
 
       Manual equivalents:
         sudo HOME="$HOME" portzero trust install
