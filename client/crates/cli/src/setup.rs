@@ -187,12 +187,7 @@ fn install_tray_agent_for(
     chown_to: Option<&str>,
     label: &str,
 ) -> Result<()> {
-    // The tray ships beside this binary in every package we build.
-    let tray = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("portzero-tray")))
-        .filter(|p| p.exists());
-    let Some(tray) = tray else {
+    let Some(tray) = tray_executable() else {
         println!("No portzero-tray binary alongside this one; skipping the tray agent.");
         return Ok(());
     };
@@ -250,6 +245,49 @@ fn install_tray_agent_for(
         println!("Tray agent written to {}.", plist_path.display());
     }
     Ok(())
+}
+
+/// Name of the tray's macOS application bundle, as built by
+/// `cargo run -p portzero-xtask --bin bundle-macos`.
+#[cfg(target_os = "macos")]
+const TRAY_BUNDLE: &str = "PortZero Tray.app";
+
+/// The tray executable to register with launchd.
+///
+/// Every candidate here ends up executing from inside `PortZero Tray.app`, which
+/// is what makes `LSUIElement` apply and keeps the tray out of the Dock — a bare
+/// Mach-O file has no `Info.plist`, so macOS gives it a Dock tile and the generic
+/// "exec" icon instead. What the order decides is *which path* launchd records,
+/// and that is an upgrade question.
+///
+/// The sibling `portzero-tray` comes first because on a Homebrew install it is
+/// `<prefix>/bin/portzero-tray` — a stable path Homebrew re-points on upgrade,
+/// holding a shim that execs the bundle. The bundle itself lives in a versioned
+/// keg, so baking its path into the LaunchAgent would leave launchd pointing at
+/// a directory that `brew upgrade` deletes. The bundle paths are fallbacks for
+/// layouts with no such sibling.
+#[cfg(target_os = "macos")]
+fn tray_executable() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+
+    // Installed layout (a shim or, before bundling, the binary itself), and the
+    // unpacked-tarball layout, where this name is a symlink into the bundle.
+    let sibling = dir.join("portzero-tray");
+    if sibling.exists() {
+        return Some(sibling);
+    }
+
+    let bundled =
+        |root: &std::path::Path| root.join(TRAY_BUNDLE).join("Contents/MacOS/portzero-tray");
+    // Bundles beside the binaries (a tarball whose flat symlinks were removed).
+    let candidate = bundled(dir);
+    if candidate.exists() {
+        return Some(candidate);
+    }
+    // Bundles at the install prefix, one level above `bin/`.
+    let candidate = bundled(dir.parent()?);
+    candidate.exists().then_some(candidate)
 }
 
 /// UID of the user whose GUI session should own the tray.

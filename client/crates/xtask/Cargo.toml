@@ -9,5 +9,9 @@ publish = false
 name = "check-file-size-budget"
 path = "src/bin/check_file_size_budget.rs"
 
+[[bin]]
+name = "bundle-macos"
+path = "src/bin/bundle_macos.rs"
+
 [dependencies]
 anyhow = "1"

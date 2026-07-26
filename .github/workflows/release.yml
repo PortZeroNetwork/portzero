@@ -270,6 +270,28 @@ jobs:
         shell: bash
 
       # ---------------------------------------------------------------------
+      # macOS .app bundles.
+      #
+      # `cargo build` produces bare Mach-O executables. macOS has nowhere to read
+      # an icon or an activation policy from for those, so portzero-app and
+      # portzero-tray both shipped with the generic "exec" icon and the tray took
+      # a Dock tile it has no window for. Only a bundle with an Info.plist fixes
+      # either. This runs BEFORE codesigning so the signature seals the finished
+      # bundle (Info.plist included) rather than a loose binary that is later
+      # moved into one — a bundle assembled after signing fails `codesign
+      # --verify` and would be rejected by notarization.
+      # ---------------------------------------------------------------------
+      - name: Bundle macOS apps
+        if: contains(matrix.target, 'apple-darwin')
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run -q -p portzero-xtask --bin bundle-macos -- \
+            --bin-dir "target/${{ matrix.target }}/release" \
+            --out-dir "target/${{ matrix.target }}/release/bundle" \
+            --version "${{ needs.version.outputs.version }}"
+
+      # ---------------------------------------------------------------------
       # macOS codesigning + notarization — OPTIONAL and strictly secret-gated.
       #
       # With the MACOS_SIGNING_* / MACOS_NOTARY_* secrets unset (the default
@@ -344,13 +366,19 @@ jobs:
             exit 1
           fi
 
-          IFS=',' read -ra BINS <<< "${{ matrix.bins }}"
-          for bin in "${BINS[@]}"; do
+          # Sign the CLI as a loose binary, and each GUI app as a bundle. Signing
+          # a bundle seals its Info.plist, so it must happen after the bundle is
+          # assembled and the bundle — not the executable inside it — is what
+          # gets passed to codesign.
+          RELEASE_DIR="target/${{ matrix.target }}/release"
+          codesign --force --options runtime --timestamp \
+            --sign "$IDENTITY" "$RELEASE_DIR/portzero"
+          codesign --verify --strict --verbose=2 "$RELEASE_DIR/portzero"
+
+          for app in "$RELEASE_DIR/bundle"/*.app; do
             codesign --force --options runtime --timestamp \
-              --sign "$IDENTITY" \
-              "target/${{ matrix.target }}/release/$bin"
-            codesign --verify --strict --verbose=2 \
-              "target/${{ matrix.target }}/release/$bin"
+              --sign "$IDENTITY" "$app"
+            codesign --verify --strict --verbose=2 "$app"
           done
 
           security delete-keychain "$KEYCHAIN"
@@ -365,17 +393,22 @@ jobs:
           MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
         run: |
           set -euo pipefail
-          # Submit the signed binaries to Apple's notary service. Bare CLI
-          # binaries can't be stapled, so notarization registers their signed
-          # hashes with Apple; Gatekeeper verifies online on first launch.
+          # Submit the signed CLI and .app bundles to Apple's notary service.
+          # Bare CLI binaries can't be stapled, so notarization registers their
+          # signed hashes with Apple and Gatekeeper verifies online on first
+          # launch. The bundles CAN be stapled, which is what lets them launch on
+          # a machine that is offline the first time the user opens them.
+          RELEASE_DIR="target/${{ matrix.target }}/release"
           NOTARIZE_DIR="$RUNNER_TEMP/notarize"
           NOTARIZE_ZIP="$RUNNER_TEMP/portzero-notarize.zip"
           rm -rf "$NOTARIZE_DIR" "$NOTARIZE_ZIP"
           mkdir -p "$NOTARIZE_DIR"
 
-          IFS=',' read -ra BINS <<< "${{ matrix.bins }}"
-          for bin in "${BINS[@]}"; do
-            cp "target/${{ matrix.target }}/release/$bin" "$NOTARIZE_DIR/"
+          cp "$RELEASE_DIR/portzero" "$NOTARIZE_DIR/"
+          # ditto rather than cp -R: it preserves the extended attributes and
+          # symlinks a bundle's signature is computed over.
+          for app in "$RELEASE_DIR/bundle"/*.app; do
+            /usr/bin/ditto "$app" "$NOTARIZE_DIR/$(basename "$app")"
           done
           /usr/bin/ditto -c -k --keepParent "$NOTARIZE_DIR" "$NOTARIZE_ZIP"
 
@@ -384,18 +417,45 @@ jobs:
             --team-id "$MACOS_NOTARY_TEAM_ID" \
             --password "$MACOS_NOTARY_PASSWORD" \
             --wait
+
+          # Staple the ticket into each bundle so first launch works offline.
+          for app in "$RELEASE_DIR/bundle"/*.app; do
+            xcrun stapler staple "$app"
+          done
           rm -rf "$NOTARIZE_DIR" "$NOTARIZE_ZIP"
 
       - name: Package (Unix)
         if: matrix.archive_ext == 'tar.gz'
+        shell: bash
         run: |
+          set -euo pipefail
           staging="${{ matrix.archive_name }}"
+          release_dir="target/${{ matrix.target }}/release"
           mkdir -p "$staging"
 
           IFS=',' read -ra BINS <<< "${{ matrix.bins }}"
-          for bin in "${BINS[@]}"; do
-            cp "target/${{ matrix.target }}/release/$bin" "$staging/"
-          done
+          if [ -d "$release_dir/bundle" ]; then
+            # macOS: the GUI binaries ship inside their .app bundles, and the
+            # familiar flat names become symlinks into them. Copying the binaries
+            # a second time would add ~65 MB to every darwin tarball, and running
+            # such a copy would defeat the bundling — a process only inherits the
+            # icon and LSUIElement of a bundle it is actually running from.
+            /usr/bin/ditto "$release_dir/bundle" "$staging"
+            for bin in "${BINS[@]}"; do
+              case "$bin" in
+                portzero-app)
+                  ln -sf "PortZero.app/Contents/MacOS/portzero-app" "$staging/portzero-app" ;;
+                portzero-tray)
+                  ln -sf "PortZero Tray.app/Contents/MacOS/portzero-tray" "$staging/portzero-tray" ;;
+                *)
+                  cp "$release_dir/$bin" "$staging/" ;;
+              esac
+            done
+          else
+            for bin in "${BINS[@]}"; do
+              cp "$release_dir/$bin" "$staging/"
+            done
+          fi
 
           tar czf "$staging.tar.gz" "$staging"
 

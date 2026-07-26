@@ -17,12 +17,40 @@ class Portzero < Formula
 
   def install
     bin.install "portzero"
-    # System-tray companion: a small GUI showing daemon/tunnel health with
-    # start/restart/stop controls. Present in the release tarball.
-    bin.install "portzero-tray" if File.exist?("portzero-tray")
-    # Desktop app: a Tauri window for managing local tunnels/services.
-    # Present in the release tarball.
-    bin.install "portzero-app" if File.exist?("portzero-app")
+
+    # macOS ships the two GUI programs as .app bundles, not loose binaries.
+    # A bare Mach-O file has no Info.plist, so macOS has nowhere to read an icon
+    # or an activation policy from: both showed the generic "exec" icon, and the
+    # tray took a Dock tile despite having no window. Only running from inside a
+    # bundle fixes that, so `bin` gets shims that exec into the bundle rather
+    # than copies of the binaries (a copy would be unbundled again, and would
+    # double the install size).
+    #
+    # The shims point at `opt_prefix`, not `prefix`: opt_prefix is the
+    # version-stable path Homebrew re-points on upgrade, so the LaunchAgent
+    # `sudo portzero setup` writes keeps working after `brew upgrade`.
+    if File.exist?("PortZero.app")
+      prefix.install "PortZero.app"
+      prefix.install "PortZero Tray.app"
+
+      {
+        "portzero-app"  => "PortZero.app/Contents/MacOS/portzero-app",
+        "portzero-tray" => "PortZero Tray.app/Contents/MacOS/portzero-tray",
+      }.each do |name, target|
+        (bin/name).write <<~SH
+          #!/bin/sh
+          exec "#{opt_prefix}/#{target}" "$@"
+        SH
+        chmod 0755, bin/name
+      end
+    else
+      # Non-macOS tarballs (and pre-bundle builds) ship loose binaries.
+      # System-tray companion: a small GUI showing daemon/tunnel health with
+      # start/restart/stop controls.
+      bin.install "portzero-tray" if File.exist?("portzero-tray")
+      # Desktop app: a Tauri window for managing local tunnels/services.
+      bin.install "portzero-app" if File.exist?("portzero-app")
+    end
   end
 
   # No post_install hook on purpose. Homebrew runs post_install with HOME
@@ -58,12 +86,16 @@ class Portzero < Formula
       is consulted, so subdomains need the /etc/resolver entry and the management
       dashboard needs the static hosts entry.
 
-      Once done, open http://portzero.local in your browser and run an example
-      from the Getting Started section.
+      Setup opens the PortZero desktop app for you once the daemon answers. That
+      app is the management UI — run an example from its Getting Started section.
+      Reopen it any time with `portzero-app`, or from the tray's "Open PortZero".
 
-      A system-tray companion (portzero-tray) ships with this formula. It shows
-      daemon/tunnel health and offers start/restart/stop controls. `sudo portzero
-      setup` registers it to start at login via
+      (There is still a browser dashboard at http://portzero.local, but the
+      desktop app replaces it and is where new features land.)
+
+      A system-tray companion ships with this formula. It shows daemon/tunnel
+      health and offers start/restart/stop controls. `sudo portzero setup`
+      registers it to start at login via
       ~/Library/LaunchAgents/cloud.portzero.tray.plist. To stop it:
         launchctl bootout gui/$(id -u)/cloud.portzero.tray
 

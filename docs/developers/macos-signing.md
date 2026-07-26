@@ -26,18 +26,31 @@ the standard pattern instead:
    (`true`/`false`).
 2. **Codesign macOS binaries** — runs only when `sign == 'true'`. Imports the
    Developer ID Application certificate into an ephemeral keychain and signs
-   each binary with `--options runtime` (hardened runtime) and a secure
-   timestamp, then deletes the keychain.
+   with `--options runtime` (hardened runtime) and a secure timestamp, then
+   deletes the keychain. The CLI is signed as a loose binary; each GUI app is
+   signed **as a bundle** (`PortZero.app`, `PortZero Tray.app`), which is what
+   seals its `Info.plist`.
 3. **Notarize macOS binaries** — runs only when `notarize == 'true'`. Zips the
-   signed binaries and submits them with `xcrun notarytool submit --wait`.
-   Bare CLI binaries can't be stapled, so notarization registers the signed
-   hashes with Apple; Gatekeeper verifies online on first launch.
+   signed CLI and bundles and submits them with `xcrun notarytool submit
+   --wait`. Bare CLI binaries can't be stapled, so notarization registers the
+   signed hashes with Apple and Gatekeeper verifies online on first launch;
+   the bundles *can* be stapled, and are, so their first launch works offline.
 
-All three steps sit between **Build** and **Package (Unix)**, so the tarball
-that ships contains the signed (and notarization-registered) binaries.
+## Ordering: bundle before sign
+
+**Bundle macOS apps** runs immediately after **Build** and before the signing
+steps, and that order is load-bearing. A bundle's signature covers its
+`Info.plist` and `Resources/`, so a binary signed loose and *then* moved into a
+bundle produces a bundle that fails `codesign --verify` and would be rejected by
+notarization. Assemble first, sign the finished bundle.
+
+All four steps sit between **Build** and **Package (Unix)**, so the tarball
+that ships contains the signed (and notarization-registered) artifacts.
 
 With the secrets unset, step 1 outputs `false`/`false` and steps 2–3 are
-skipped entirely — a strict no-op.
+skipped entirely — a strict no-op. Bundling is **not** gated on the secrets: it
+runs on every darwin build, signed or not, because the icon and the tray's
+missing Dock tile come from the bundle, not from the signature.
 
 ## Secrets that enable it
 

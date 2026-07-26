@@ -67,7 +67,39 @@ workflow (tests, hooks, `just`).
    there is no separate asset bundle to ship or a web server to run; the
    built app is self-contained.
 3. `cargo build -p portzero-app --release` (or the equivalent packaging step
-   in the release workflow) produces the final per-platform binary/bundle.
+   in the release workflow) produces the final per-platform binary.
+
+## macOS: the `.app` bundles
+
+`cargo build` emits a bare Mach-O executable. macOS has nowhere to read an icon
+or an activation policy from for such a file, so both GUI binaries showed the
+generic "exec" icon and `portzero-tray` took a Dock tile despite having no
+window. The fix is a real bundle with an `Info.plist`, built by
+
+```
+cargo run -p portzero-xtask --bin bundle-macos -- --bin-dir <dir> --out-dir <dir>
+just bundle-macos      # the local convenience wrapper
+```
+
+which produces `PortZero.app` (regular app, PortZero icon) and
+`PortZero Tray.app` (`LSUIElement`, so no Dock tile). `portzero-app` is a Tauri
+app and `cargo tauri build` would bundle it, but `portzero-tray` is not a Tauri
+app at all — one bundler covers both and leaves the four-target build matrix
+alone.
+
+Consequences worth knowing:
+
+- **The tarball ships bundles, not loose GUI binaries.** `portzero-app` and
+  `portzero-tray` at the archive root are symlinks into the bundles, so the
+  familiar names still work without shipping ~65 MB of duplicate binary.
+- **Homebrew installs the bundles into the keg** and writes `bin/` shims that
+  exec into them via the version-stable `opt_prefix`. A *copy* in `bin/` would
+  be unbundled again and defeat the whole exercise — a process only inherits
+  the icon and `LSUIElement` of a bundle it actually runs from.
+- **Binary resolution is bundle-aware.** `portzero_domain::app::sibling_bin`
+  understands the `<prefix>/<Name>.app/Contents/MacOS/<exe>` layout and also
+  searches both Homebrew prefixes, because an app launched from Finder or a
+  LaunchAgent inherits a `PATH` with neither on it.
 
 ## Packaging and shipping
 

@@ -28,12 +28,30 @@ class PortzeroEdge < Formula
 
   def install
     bin.install "portzero"
-    # System-tray companion: a small GUI showing daemon/tunnel health with
-    # start/restart/stop controls. Present in the release tarball.
-    bin.install "portzero-tray" if File.exist?("portzero-tray")
-    # Desktop app: a Tauri window for managing local tunnels/services.
-    # Present in the release tarball.
-    bin.install "portzero-app" if File.exist?("portzero-app")
+
+    # Mirrors the stable formula: on macOS the GUI programs ship as .app bundles
+    # (a loose binary has no Info.plist, so it gets the generic "exec" icon and
+    # the tray gets a Dock tile it has no window for), and `bin` gets shims that
+    # exec into the bundle via the version-stable opt_prefix. See
+    # packaging/homebrew/Formula/portzero.rb for the full rationale.
+    if File.exist?("PortZero.app")
+      prefix.install "PortZero.app"
+      prefix.install "PortZero Tray.app"
+
+      {
+        "portzero-app"  => "PortZero.app/Contents/MacOS/portzero-app",
+        "portzero-tray" => "PortZero Tray.app/Contents/MacOS/portzero-tray",
+      }.each do |name, target|
+        (bin/name).write <<~SH
+          #!/bin/sh
+          exec "#{opt_prefix}/#{target}" "$@"
+        SH
+        chmod 0755, bin/name
+      end
+    else
+      bin.install "portzero-tray" if File.exist?("portzero-tray")
+      bin.install "portzero-app" if File.exist?("portzero-app")
+    end
   end
 
   def post_install
@@ -95,9 +113,14 @@ class PortzeroEdge < Formula
       is consulted, so subdomains need the /etc/resolver entry and the management
       dashboard needs the static hosts entry.
 
-      Once done, open http://portzero.local in your browser.
+      Setup opens the PortZero desktop app for you once the daemon answers. That
+      app is the management UI — run an example from its Getting Started section.
+      Reopen it any time with `portzero-app`, or from the tray's "Open PortZero".
 
-      A system-tray companion (portzero-tray) is installed and set to start at
+      (There is still a browser dashboard at http://portzero.local, but the
+      desktop app replaces it and is where new features land.)
+
+      A system-tray companion is installed and set to start at
       login via ~/Library/LaunchAgents/cloud.portzero.tray.plist. It shows
       daemon/tunnel health and offers start/restart/stop controls. To stop it:
         launchctl unload ~/Library/LaunchAgents/cloud.portzero.tray.plist

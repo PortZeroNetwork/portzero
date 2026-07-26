@@ -502,6 +502,23 @@ app-build:
     Pop-Location
     cargo build --release -p portzero-app
 
+# Build the macOS .app bundles for portzero-app and portzero-tray into
+# target/release/bundle/. Mirrors the release workflow's "Bundle macOS apps"
+# step, so you can check the Dock icon and the tray's missing Dock tile locally
+# instead of finding out from a release. Both binaries must be built first
+# (`just app-build` and `cargo build --release -p portzero-tray`).
+[macos]
+bundle-macos:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo run -q -p portzero-xtask --bin bundle-macos -- \
+        --bin-dir target/release \
+        --out-dir target/release/bundle
+    echo
+    echo "Open them with:"
+    echo "  open 'target/release/bundle/PortZero.app'"
+    echo "  open 'target/release/bundle/PortZero Tray.app'"
+
 # Run the unprivileged local checks from the main CI job.
 # Recommended before pushing. Follow with `just e2e` for current-OS CI parity.
 # This still does not cover the other CI operating systems or release packaging.
