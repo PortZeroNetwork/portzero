@@ -1219,6 +1219,18 @@ jobs:
           sed -i "s/sha256 \"[^\"]*\" # arm64/sha256 \"${AARCH64_SHA256}\" # arm64/" "$TARGET"
           sed -i "s/sha256 \"[^\"]*\" # x86_64/sha256 \"${X86_64_SHA256}\" # x86_64/" "$TARGET"
 
+          # Point the download URLs at whichever repo is publishing this release.
+          # Only version and sha256 used to be rewritten, so the owner/repo in the
+          # url was whatever a human last typed — and it silently kept pointing at
+          # `portzero-local` after this repo was renamed to `portzero`. The stable
+          # formula then advertised a new version against a repo that would never
+          # have it. Deriving it from $GITHUB_REPOSITORY means the tap cannot drift
+          # from its source again, and a future rename needs no tap edit.
+          sed -i -E "s#https://github\.com/[^/]+/[^/]+/releases/download/#https://github.com/${GITHUB_REPOSITORY}/releases/download/#g" "$TARGET"
+
+          echo "Formula ${FORMULA} -> ${VERSION}, assets from ${GITHUB_REPOSITORY}:"
+          grep -E 'version "|url "' "$TARGET"
+
       - name: Commit and push
         env:
           VERSION: ${{ needs.version.outputs.version }}
