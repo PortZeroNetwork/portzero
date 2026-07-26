@@ -209,8 +209,19 @@ pub(crate) async fn fetch_latest_version() -> Result<Option<String>> {
 mod tests {
     use super::*;
 
+    /// Serializes tests that mutate process-wide env vars. `std::env::set_var`
+    /// and `remove_var` affect the whole process, and cargo runs tests in
+    /// parallel threads, so a test that clears `PZ_TUNNEL_UPDATE_BASE_URL` can
+    /// land between another test's set and its assertion (and vice versa).
+    /// Same helper and reasoning as `portzero_domain`'s `lib_tests::env_lock`.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn test_version_url_default_format() {
+        let _guard = env_lock();
         // With no override, the check must resolve to the newest stable
         // release's version.json on the current repo. The org/repo pinning
         // itself is asserted in portzero_domain::endpoints tests.
@@ -225,6 +236,7 @@ mod tests {
 
     #[test]
     fn test_version_url_honours_base_override() {
+        let _guard = env_lock();
         // The self-update test harness points the checker + updater at a local
         // release mirror; version.json must be fetched from there.
         std::env::set_var("PZ_TUNNEL_UPDATE_BASE_URL", "http://127.0.0.1:9/mirror");
@@ -341,6 +353,7 @@ mod tests {
 
     #[test]
     fn test_should_check_env_var_disables() {
+        let _guard = env_lock();
         std::env::set_var("PZ_TUNNEL_NO_UPDATE_CHECK", "1");
         assert!(!should_check());
         std::env::remove_var("PZ_TUNNEL_NO_UPDATE_CHECK");
@@ -348,6 +361,7 @@ mod tests {
 
     #[test]
     fn test_should_check_missing_timestamp_file() {
+        let _guard = env_lock();
         std::env::remove_var("PZ_TUNNEL_NO_UPDATE_CHECK");
         // When timestamp file doesn't exist, should_check returns true
         // (we should check since we've never checked before)
