@@ -29,6 +29,11 @@
 # Env:
 #   PORTZERO_EXE  path to the portzero binary (the harness pushes the host-built
 #                 one in and sets this). Defaults to a copy under /tmp.
+#   PORTZERO_TRAY_EXE  path to the portzero-tray binary, if built for this run
+#                 (see vm-e2e.yml's "Build macOS binary" step). Defaults to a
+#                 sibling `portzero-tray` next to PORTZERO_EXE. When neither
+#                 exists the tray-specific checks below SKIP cleanly (never a
+#                 false fail) — same idiom as the brew-not-installed SKIP.
 #   LIFECYCLE_SKIP_BREW=1  skip the offline brew-install phase entirely (used
 #                 only when driving the residue lifecycle in isolation).
 # Helper predicates are invoked indirectly via assert/assert_not; silence the
@@ -37,6 +42,8 @@
 set -uo pipefail
 
 EXE="${PORTZERO_EXE:-/tmp/portzero-vmtest/bin/portzero}"
+TRAY_EXE="${PORTZERO_TRAY_EXE:-$(dirname "$EXE")/portzero-tray}"
+TRAY_PLIST="$HOME/Library/LaunchAgents/cloud.portzero.tray.plist"
 PLIST=/Library/LaunchDaemons/cloud.portzero.daemon.plist
 RESOLVER=/etc/resolver/portzero.local
 HOSTS_PIN='# portzero-local'
@@ -79,8 +86,10 @@ utun_present() {
     # don't trip over unrelated utun interfaces (VPNs etc.).
     ifconfig 2>/dev/null | grep -A3 "^${TUN_PREFIX}" | grep -q '10\.254\.0\.1'
 }
+tray_launchagent_loaded() { launchctl print "gui/$(id -u)/cloud.portzero.tray" >/dev/null 2>&1; }
+tray_process_running() { pgrep -x portzero-tray >/dev/null 2>&1; }
 
-echo "PHASE=preflight exe=$([ -x "$EXE" ] && echo true || echo false) tun=${LIFECYCLE_TUN:-0}"
+echo "PHASE=preflight exe=$([ -x "$EXE" ] && echo true || echo false) tray_exe=$([ -x "$TRAY_EXE" ] && echo true || echo false) tun=${LIFECYCLE_TUN:-0}"
 if [ ! -x "$EXE" ]; then
     echo "RESULT=FAIL portzero binary not found at $EXE (set PORTZERO_EXE)"
     exit 1
@@ -119,6 +128,12 @@ run_brew_phase() {
     mkdir -p "$stage"
     cp "$EXE" "$stage/portzero"
     chmod +x "$stage/portzero"
+    local have_tray=0
+    if [ -x "$TRAY_EXE" ]; then
+        cp "$TRAY_EXE" "$stage/portzero-tray"
+        chmod +x "$stage/portzero-tray"
+        have_tray=1
+    fi
     ( cd "$work" && tar czf "$tarball" "portzero-darwin-${tar_arch}" )
 
     sha="$(shasum -a 256 "$tarball" | awk '{print $1}')"
@@ -140,12 +155,36 @@ class Portzero < Formula
 
   def install
     bin.install "portzero"
+    bin.install "portzero-tray" if File.exist?("portzero-tray")
   end
 
   def post_install
     # Mirror the shipped formula: generate the local CA (unprivileged; writes to
     # ~/Library/Application Support/PortZero/). Idempotent.
     system "#{bin}/portzero", "trust", "generate"
+
+    # Mirror the shipped formula's per-user LaunchAgent so the tray starts at
+    # login without further intervention. Best-effort: only load it if the
+    # tray binary shipped in this tarball.
+    return unless File.exist?("#{opt_bin}/portzero-tray")
+
+    require "fileutils"
+    agents_dir = File.expand_path("~/Library/LaunchAgents")
+    plist_path = "#{agents_dir}/cloud.portzero.tray.plist"
+    FileUtils.mkdir_p(agents_dir)
+    File.write(plist_path, <<~PLIST)
+      <?xml version="1.0" encoding="UTF-8"?>
+      <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+      <plist version="1.0"><dict>
+        <key>Label</key><string>cloud.portzero.tray</string>
+        <key>ProgramArguments</key>
+        <array><string>#{opt_bin}/portzero-tray</string></array>
+        <key>RunAtLoad</key><true/>
+        <key>KeepAlive</key><true/>
+      </dict></plist>
+    PLIST
+    quiet_system "/bin/launchctl", "unload", plist_path
+    quiet_system "/bin/launchctl", "load", plist_path
   end
 
   def caveats
@@ -174,6 +213,7 @@ EOF
 
     echo ">> brew install --formula (offline, generated formula)"
     rm -f "$CA_APP_SUPPORT" 2>/dev/null || true
+    rm -f "$TRAY_PLIST" 2>/dev/null || true
     local ilog="$work/brew-install.log"
     brew install --formula "$formula" >"$ilog" 2>&1 || true
 
@@ -187,9 +227,40 @@ EOF
     # instruction (brew renders caveats from the formula's method).
     assert brew-caveats-setup         brew_caveats_mentions_setup "$formula"
 
+    # Tray icon: proves the formula lands portzero-tray and registers it as a
+    # per-user LaunchAgent, so it starts at login without further intervention
+    # — the delivery-vehicle half of the "you get a tray icon" ask. Only
+    # exercised when a tray binary was actually available to stage (see
+    # PORTZERO_TRAY_EXE / vm-e2e.yml's "Build macOS binary" step); otherwise
+    # SKIP cleanly, never a false fail.
+    if [ "$have_tray" = 1 ]; then
+        assert brew-install-tray-binary             test -x "$prefix/bin/portzero-tray"
+        assert brew-post-install-launchagent-plist  test -f "$TRAY_PLIST"
+        # `launchctl load` into the per-user gui domain from a headless
+        # `prlctl exec` session may not attach without an active Aqua login
+        # (the same class of limitation as install-launchdaemon-loaded below,
+        # just gui domain instead of system domain), so these can't be hard
+        # asserts. Daemon/tray-running state is covered for real by
+        # e2e-local-overlay.sh's interactive session.
+        assert_or_skip brew-tray-launchagent-loaded \
+            "launchctl load into the per-user gui domain from a headless prlctl exec session may not attach without an active Aqua login" \
+            tray_launchagent_loaded
+        assert_or_skip brew-tray-running \
+            "same headless-session limitation as brew-tray-launchagent-loaded" \
+            tray_process_running
+    else
+        echo 'PHASE=brew-install-tray-binary ok=SKIP reason="no portzero-tray binary available (set PORTZERO_TRAY_EXE)"'
+    fi
+
     echo ">> brew uninstall --formula"
+    pkill -x portzero-tray 2>/dev/null || true
+    launchctl unload "$TRAY_PLIST" >/dev/null 2>&1 || true
     brew uninstall --formula portzero >/dev/null 2>&1 || true
     assert brew-uninstall-binary-gone test ! -e "$prefix/bin/portzero"
+    if [ "$have_tray" = 1 ]; then
+        assert brew-uninstall-tray-binary-gone test ! -e "$prefix/bin/portzero-tray"
+    fi
+    rm -f "$TRAY_PLIST" 2>/dev/null || true
 
     rm -rf "$work" 2>/dev/null || true
 }

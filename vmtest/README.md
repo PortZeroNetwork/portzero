@@ -200,9 +200,26 @@ landed, run the real uninstaller, then assert the artifacts are removed:
 
 | Platform | Install (real)                | Asserts landed → **then GONE**                                              |
 |----------|-------------------------------|-----------------------------------------------------------------------------|
-| Linux    | `dpkg -i` the built `.deb`    | binary, `setcap` caps, `/etc/hosts` pin, systemd unit; CA in system trust store + `/etc/ssl` + `ca-certificates.conf`; `~/.config` autostart unit |
-| Windows  | `msiexec /i` the signed MSI   | binary, scheduled task, CA in `LocalMachine\Root`, `.portzero.local` NRPT rule, Wintun adapter |
-| macOS    | **offline `brew install`** of a generated local formula, **then** privileged `portzero setup` | brew phase: binary linked onto PATH under the brew prefix + `post_install` CA generated + caveats surface `sudo portzero setup`, then `brew uninstall` removes it; setup phase: CA in System keychain, root LaunchDaemon, `/etc/resolver/portzero.local`, `/etc/hosts` pin — **then GONE** |
+| Linux    | `dpkg -i` the built `.deb`    | binary, `setcap` caps, `/etc/hosts` pin, systemd unit; CA in system trust store + `/etc/ssl` + `ca-certificates.conf`; `~/.config` autostart unit; tray binary, app-launcher entry (`/usr/share/applications/portzero.desktop`), tray XDG autostart entry (`/etc/xdg/autostart/portzero-tray.desktop`) |
+| Windows  | `msiexec /i` the signed MSI   | binary, scheduled task, CA in `LocalMachine\Root`, `.portzero.local` NRPT rule, Wintun adapter; tray binary, tray autostart (`HKLM…\Run\PortZeroTray`), Start Menu shortcut |
+| macOS    | **offline `brew install`** of a generated local formula, **then** privileged `portzero setup` | brew phase: binary linked onto PATH under the brew prefix + `post_install` CA generated + caveats surface `sudo portzero setup`, then `brew uninstall` removes it; tray binary + per-user LaunchAgent plist when a tray build is available; setup phase: CA in System keychain, root LaunchDaemon, `/etc/resolver/portzero.local`, `/etc/hosts` pin — **then GONE** |
+
+**Tray icon + app-launcher coverage.** All three platforms now assert the
+packaging that makes "you get a tray icon without further intervention" true:
+the tray binary lands, and the OS-native autostart registration for it exists
+(systemd XDG autostart entry on Linux, the `HKLM…\Run` key on Windows, a
+per-user LaunchAgent plist on macOS) — plus, on Linux and Windows, an
+app-launcher entry (`.desktop` file / Start Menu shortcut) for the desktop app.
+Whether the tray process is *actually running* right after install can't be a
+hard assert on any platform — it depends on a live logged-in desktop session
+existing at install time, which a headless `prlctl exec` install can't
+guarantee — so that one check reports `ok=SKIP` rather than failing the run
+when no such session is present (same idiom as `install-launchdaemon-loaded`
+below). macOS ships no `.app`/Applications entry at all (Homebrew CLI-only
+delivery — see the caveats below), so there's no "in Launchpad" equivalent to
+test there; the tray's LaunchAgent is the closest analogue and needs a
+`portzero-tray` build staged into the generated formula (`PORTZERO_TRAY_EXE`,
+defaulted from `vm-e2e.yml`'s macOS build step) or its checks SKIP cleanly.
 
 Each prints greppable `PHASE=<name> ok=<true|false>` lines and a final
 `RESULT=PASS|FAIL`; a leftover artifact yields `ok=false` and fails the run. The

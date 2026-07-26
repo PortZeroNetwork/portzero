@@ -242,8 +242,12 @@ jobs:
         # macOS guest testing is host-built-artifact-only (no toolchain in
         # that guest); vmkit pushes this into the guest itself (see
         # VMKIT_ARTIFACT_MACOS in ./vmkit.conf). Only the macos leg needs this.
+        # portzero-tray is built alongside portzero so the tray/LaunchAgent
+        # checks in lifecycle-macos.sh / combined-macos.sh have a real binary
+        # to stage into the generated Homebrew formula (PORTZERO_TRAY_EXE
+        # defaults to this sibling path when unset).
         if: matrix.platform == 'macos'
-        run: cargo build --release -p portzero-cli --bin portzero
+        run: cargo build --release -p portzero-cli --bin portzero --bin portzero-tray
 
       - name: Download windows binary
         if: matrix.platform == 'windows'

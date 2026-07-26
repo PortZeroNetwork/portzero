@@ -29,6 +29,9 @@ $TaskName = 'cloud.portzero.daemon'
 $NrptMatch = 'portzero.local'
 $AdapterName = 'deven0'
 $InstalledExe = Join-Path ${env:ProgramFiles} 'Port Zero\portzero.exe'
+$InstalledTrayExe = Join-Path ${env:ProgramFiles} 'Port Zero\portzero-tray.exe'
+$TrayRunKey = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run'
+$StartMenuShortcut = Join-Path ${env:ProgramData} 'Microsoft\Windows\Start Menu\Programs\PortZero\PortZero.lnk'
 
 function Phase {
     param([string] $Name, [bool] $Ok)
@@ -38,6 +41,16 @@ function Phase {
         "PHASE=$Name ok=false"
         $script:fails++
     }
+}
+# Like Phase, but never counts as a failure: reports ok=true when the
+# predicate holds, else ok=SKIP with a reason. Reserved for runtime states a
+# headless `prlctl exec` install genuinely cannot guarantee — the HKLM Run
+# value only autostarts the tray at an interactive logon, which msiexec
+# running as SYSTEM here does not produce.
+function Phase-Skip {
+    param([string] $Name, [bool] $Ok, [string] $Reason)
+    if ($Ok) { "PHASE=$Name ok=true" }
+    else { "PHASE=$Name ok=SKIP reason=`"$Reason`"" }
 }
 
 # Run a scriptblock under a hard timeout so a wedged msiexec / stop never hangs
@@ -75,6 +88,16 @@ function Test-AdapterPresent {
     $a = Get-NetAdapter -Name $AdapterName -ErrorAction SilentlyContinue
     return [bool] $a
 }
+function Test-TrayAutostartRegistered {
+    $v = Get-ItemProperty -Path $TrayRunKey -Name 'PortZeroTray' -ErrorAction SilentlyContinue
+    return [bool] $v
+}
+function Test-StartMenuShortcutPresent {
+    return (Test-Path $StartMenuShortcut)
+}
+function Test-TrayProcessRunning {
+    return [bool] (Get-Process -Name portzero-tray -ErrorAction SilentlyContinue)
+}
 
 function Find-Msi {
     if ($env:PORTZERO_MSI -and (Test-Path $env:PORTZERO_MSI)) { return $env:PORTZERO_MSI }
@@ -99,6 +122,17 @@ $p = Start-Process msiexec.exe -ArgumentList @('/i', "`"$msi`"", '/qn', '/norest
 Phase 'install-exit' ($p.ExitCode -eq 0)
 Phase 'install-binary' (Test-Path $InstalledExe)
 Phase 'install-task' (Test-TaskPresent)
+
+# Tray icon + Start Menu shortcut: proves the MSI lands the tray binary,
+# registers it to autostart at logon (HKLM Run), and gives the desktop app a
+# Start Menu entry, all without any post-install step from the user.
+Phase 'install-tray-binary' (Test-Path $InstalledTrayExe)
+Phase 'install-tray-autostart-registered' (Test-TrayAutostartRegistered)
+Phase 'install-start-menu-shortcut' (Test-StartMenuShortcutPresent)
+# The Run key only autostarts the tray at an interactive logon; msiexec ran
+# this install as SYSTEM with no logon event, so this can't be a hard assert.
+Phase-Skip 'install-tray-running' (Test-TrayProcessRunning) `
+    'HKLM Run only autostarts the tray at interactive logon; msiexec installed this as SYSTEM with no logon event, so this cannot be observed under headless prlctl exec (autostart is still registered regardless, via install-tray-autostart-registered)'
 
 # The daemon (started by the MSI custom action) brings up the overlay
 # asynchronously; poll for the trust store + NRPT + adapter to appear.
@@ -134,6 +168,10 @@ Phase 'clean-task' (-not (Test-TaskPresent))
 Phase 'clean-trust-ca' (-not (Test-CertPresent))
 Phase 'clean-nrpt-rule' (-not (Test-NrptPresent))
 Phase 'clean-wintun-adapter' (-not (Test-AdapterPresent))
+Phase 'clean-tray-binary' (-not (Test-Path $InstalledTrayExe))
+Phase 'clean-tray-autostart-registered' (-not (Test-TrayAutostartRegistered))
+Phase 'clean-start-menu-shortcut' (-not (Test-StartMenuShortcutPresent))
+Phase 'clean-tray-running' (-not (Test-TrayProcessRunning))
 
 if ($script:fails -eq 0) {
     "RESULT=PASS lifecycle (install -> verify -> uninstall -> assert-clean)"
