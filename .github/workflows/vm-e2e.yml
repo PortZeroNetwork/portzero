@@ -75,27 +75,46 @@ jobs:
 
   build-macos:
     name: Build macos binary
-    # Built here (GitHub-hosted, Apple Silicon) instead of on the self-hosted
-    # runner inside vm-test: it's a plain `cargo build`, needs no vmkit/
-    # Parallels access, and every minute it doesn't spend on the org's one
-    # self-hosted macOS runner is a minute that runner has free for the guest
-    # tests that actually require it. portzero-tray is built alongside
-    # portzero so lifecycle-macos.sh / combined-macos.sh have a real tray
-    # binary to stage (see VMKIT_ARTIFACT_MACOS / PORTZERO_TRAY_EXE in
-    # ./vmkit.conf) — same pair the self-hosted job used to build.
+    # Built here (GitHub-hosted) instead of on the self-hosted runner inside
+    # vm-test: it's a plain `cargo build`, needs no vmkit/Parallels access,
+    # and every minute it doesn't spend on the org's one self-hosted macOS
+    # runner is a minute that runner has free for the guest tests that
+    # actually require it. portzero-tray is built alongside portzero so
+    # lifecycle-macos.sh / combined-macos.sh have a real tray binary to stage
+    # (see VMKIT_ARTIFACT_MACOS / PORTZERO_TRAY_EXE in ./vmkit.conf) — same
+    # pair the self-hosted job used to build.
+    #
+    # Cross-compiled to x86_64-apple-darwin, NOT built for the runner's own
+    # arch. GitHub's macos-15 runners are Apple Silicon; the self-hosted
+    # runner that hosts the Parallels VMs is an Intel Mac, so its macOS guest
+    # is x86_64 and an arm64 binary is unrunnable there ("bad CPU type in
+    # executable"). When the build lived on the self-hosted runner this was
+    # implicit — the host WAS the guest's arch. It isn't any more, so the
+    # target is named explicitly, and vm-test asserts the match below rather
+    # than trusting this comment to stay true.
+    #
+    # x86_64-apple-darwin is also what a user on that hardware installs:
+    # release.yml ships per-arch darwin archives (portzero-darwin-amd64 /
+    # -arm64), not a universal binary, so this is the same shape that ships.
     runs-on: macos-15
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --bin portzero --bin portzero-tray
+      - run: cargo build --release --target x86_64-apple-darwin --bin portzero --bin portzero-tray
       - uses: actions/upload-artifact@v5
         with:
+          # Both paths share target/x86_64-apple-darwin/release as their
+          # common ancestor, so the artifact holds a flat `portzero` +
+          # `portzero-tray` — exactly what vm-test's download into
+          # target/release expects (VMKIT_ARTIFACT_MACOS).
           name: portzero-macos
           path: |
-            target/release/portzero
-            target/release/portzero-tray
+            target/x86_64-apple-darwin/release/portzero
+            target/x86_64-apple-darwin/release/portzero-tray
           retention-days: 1
 
   # Real installable artifacts for the lifecycle test (install -> verify ->
@@ -296,6 +315,36 @@ jobs:
         # binary below).
         if: matrix.platform == 'macos'
         run: chmod +x target/release/portzero target/release/portzero-tray
+
+      - name: Assert the macOS binary matches the guest's architecture
+        # build-macos cross-compiles for x86_64-apple-darwin because this
+        # runner is an Intel Mac and its Parallels macOS guest is therefore
+        # x86_64. That's a fact about the hardware, not about the workflow, so
+        # check it instead of assuming it: if this Mac is ever replaced with an
+        # Apple Silicon one, build-macos must switch targets to match.
+        #
+        # Worth the lines because the failure it catches is expensive and
+        # unreadable otherwise. An arch-mismatched binary can't exec in the
+        # guest, but every phase of combined-macos.sh only records `ok=false`
+        # — the run burns ~8 minutes and reports five unrelated-looking
+        # assertion failures with no mention of architecture anywhere.
+        #
+        # vmkit >= 0.4.1 checks this too, against the guest's own `uname -m`
+        # (assert_artifact_runnable, FAILURES.md #17). Kept here as well: this
+        # fires before a VM is even started, and doesn't depend on which vmkit
+        # the runner happens to have installed.
+        if: matrix.platform == 'macos'
+        run: |
+          host_arch="$(uname -m)"
+          bin_arch="$(lipo -archs target/release/portzero)"
+          case " $bin_arch " in
+            *" $host_arch "*) echo "portzero: $bin_arch (host $host_arch) — ok" ;;
+            *)
+              echo "::error::macOS binary is [$bin_arch] but this runner (and its Parallels guest) is $host_arch — it cannot exec in the guest."
+              echo "Fix build-macos in this workflow to target $host_arch-apple-darwin."
+              exit 1
+              ;;
+          esac
 
       - name: Download windows binary
         if: matrix.platform == 'windows'
