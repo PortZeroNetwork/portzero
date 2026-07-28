@@ -1,7 +1,7 @@
 ---
 id: 172b5f0f-f7e5-4d44-beb7-4680b8f0bb7c
 slug: decision-2
-status: draft
+status: done
 title: 'ADR: Multi-user strategy — shared machines, non-consenting accounts, and who owns the overlay'
 ticket_type: decision
 created_at: 2026-07-28T00:00:00Z
@@ -82,7 +82,7 @@ already-decided context.
 
 ## Decision
 
-**Proposed (not yet ratified): Option 1 now, with Option 3 as the recorded
+**Ratified 2026-07-28: Option 1 now, with Option 3 as the recorded
 long-term direction if shared-machine demand materializes.**
 
 Rationale: today's users are developers on machines they own alone; the
@@ -94,12 +94,13 @@ demand signal on. Option 3 is the right shape if that demand appears, and
 nothing in Option 1 forecloses it — the UID filter becomes "registered
 sessions' UIDs", and root-owned key custody is a prerequisite for it anyway.
 
-- [ ] Decision ratified (owner sign-off)
-- [ ] Implementation tickets cut: discovery UID filter; root-owned CA key
-      custody; install-time single-owner check; privacy-notice update
+- [x] Decision ratified (owner sign-off, 2026-07-28)
+- [x] Implementation tickets cut: [[task-94]] discovery UID filter;
+      [[task-95]] root-owned CA key custody; [[task-96]] install-time
+      single-owner check; [[task-97]] privacy-notice update
       (docs/users/privacy.md and its portzero.net/docs twin must state that
-      the daemon reads process environments and how that is scoped);
-      shared-machine section in the published docs
+      the daemon reads process environments and how that is scoped) plus
+      the shared-machine section in the published docs
 
 ## Consequences
 
