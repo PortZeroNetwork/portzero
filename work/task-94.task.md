@@ -1,7 +1,7 @@
 ---
 id: 478f1c45-2535-4cc9-b528-514f8cdbc155
 slug: task-94
-status: todo
+status: done
 title: 'Discovery: only act on processes owned by the daemon owner''s UID'
 created_at: 2026-07-28T00:00:00Z
 updated_at: 2026-07-28T00:00:00Z
@@ -29,12 +29,27 @@ environments we will discard.
 
 Done when:
 
-- [ ] macOS: process discovery ignores processes whose owning UID differs
+- [x] macOS: process discovery ignores processes whose owning UID differs
       from the daemon owner's (Docker discovery is unaffected — the Docker
       socket is already an explicit grant)
-- [ ] Windows: same filter under the Administrator service model
-- [ ] Linux: no behavior change (assert/document that the unprivileged
+- [x] Windows: same filter under the Administrator service model
+- [x] Linux: no behavior change (assert/document that the unprivileged
       service already cannot cross accounts)
-- [ ] A log line at debug level counts skipped foreign-UID processes, so a
+- [x] A log line at debug level counts skipped foreign-UID processes, so a
       shared-machine user can see why their process was not picked up
-- [ ] Covered by unit tests with synthetic process lists
+- [x] Covered by unit tests with synthetic process lists
+
+## Outcome
+
+Implemented in `discovery/process/owner.rs` (`OwnerScope`), applied at all
+five scan sites in `discovery/process.rs` (cloud + overlay, per platform).
+Owner resolution (cached per daemon lifetime): an unprivileged daemon owns
+itself; a root daemon resolves the real user from `SUDO_UID`, else the owner
+of the pinned `HOME`; a Windows service-account daemon (SYSTEM /
+LocalService / NetworkService) and an unresolvable root daemon leave
+discovery **unscoped with a warning** — the pre-task-94 behavior — rather
+than scoping to root/SYSTEM, which would silently discover nothing.
+A process whose user is unknown counts as foreign while a scope is active.
+Linux keeps its natural scoping and is documented as such in the module doc;
+the filter there only skips doomed environment reads. Unit tests cover the
+permit logic and Unix/Windows owner resolution.
