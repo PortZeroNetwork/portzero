@@ -5,10 +5,12 @@
 use super::*;
 
 mod context;
+mod owner;
 mod platform;
 
 #[allow(unused_imports)]
 pub(in crate::discovery) use context::*;
+use owner::OwnerScope;
 #[allow(unused_imports)]
 pub(in crate::discovery) use platform::*;
 
@@ -25,30 +27,41 @@ pub(super) fn scan_processes(
     {
         let mut sys = System::new();
         sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        let scope = OwnerScope::detect(&sys);
 
         let mut services = Vec::new();
         let mut issues = Vec::new();
 
-        // (pid, PZ_TUNNEL) candidates. macOS reads each process's env via
-        // sysctl(KERN_PROCARGS2) rather than `ps -E`, which stopped exposing
-        // process environments on macOS 15.7+ (task-74; see
-        // scan_process_env_macos). KERN_PROCARGS2 is a syscall with no
-        // subprocess, so the per-pid scan is cheap — like Linux reading
-        // /proc/<pid>/environ. Mirrors scan_network_processes_sync_macos.
+        // (pid, PZ_TUNNEL) candidates, scoped to the daemon owner's processes.
+        // macOS reads each process's env via sysctl(KERN_PROCARGS2) rather
+        // than `ps -E`, which stopped exposing process environments on macOS
+        // 15.7+ (task-74; see scan_process_env_macos). KERN_PROCARGS2 is a
+        // syscall with no subprocess, so the per-pid scan is cheap — like
+        // Linux reading /proc/<pid>/environ. Mirrors
+        // scan_network_processes_sync_macos.
         #[cfg(target_os = "macos")]
-        let candidates: Vec<(u32, String)> = scan_macos_env_candidates(&sys);
+        let candidates: Vec<(u32, String)> = scan_macos_env_candidates(&sys, &scope, "cloud");
         #[cfg(not(target_os = "macos"))]
-        let candidates: Vec<(u32, String)> = sys
-            .processes()
-            .keys()
-            .filter_map(|pid| {
-                let pid_u32 = pid.as_u32();
-                match scan_process_env(pid_u32, ENV_VAR_NAME) {
-                    Some(v) if !v.is_empty() => Some((pid_u32, v)),
-                    _ => None,
-                }
-            })
-            .collect();
+        let candidates: Vec<(u32, String)> = {
+            let mut foreign = 0usize;
+            let candidates: Vec<(u32, String)> = sys
+                .processes()
+                .iter()
+                .filter_map(|(pid, process)| {
+                    if !scope.permits(Some(process)) {
+                        foreign += 1;
+                        return None;
+                    }
+                    let pid_u32 = pid.as_u32();
+                    match scan_process_env(pid_u32, ENV_VAR_NAME) {
+                        Some(v) if !v.is_empty() => Some((pid_u32, v)),
+                        _ => None,
+                    }
+                })
+                .collect();
+            scope.log_skipped(foreign, "cloud");
+            candidates
+        };
 
         for (pid_u32, raw) in candidates {
             if pid_u32 <= 1 {
@@ -223,6 +236,8 @@ pub(super) fn scan_processes_windows(
 ) -> (Vec<DiscoveredService>, Vec<crate::notify::Issue>) {
     let mut sys = System::new();
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    let scope = OwnerScope::detect(&sys);
+    let mut foreign = 0usize;
 
     let listening_by_pid = discover_all_ports_windows_by_pid();
     let mut services = Vec::new();
@@ -230,6 +245,11 @@ pub(super) fn scan_processes_windows(
 
     for (pid_u32, listening) in listening_by_pid {
         if pid_u32 <= 1 || listening.is_empty() {
+            continue;
+        }
+
+        if !scope.permits(sys.process(sysinfo::Pid::from_u32(pid_u32))) {
+            foreign += 1;
             continue;
         }
 
@@ -379,6 +399,7 @@ pub(super) fn scan_processes_windows(
         });
     }
 
+    scope.log_skipped(foreign, "cloud");
     (services, issues)
 }
 
@@ -412,13 +433,20 @@ fn scan_network_processes_sync() -> Vec<NetProcessCandidate> {
 
         let mut sys = System::new();
         sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        let scope = OwnerScope::detect(&sys);
+        let mut foreign = 0usize;
 
         let daemon_no_probe = std::env::var(ENV_NO_PROBE_VAR).ok();
         let mut candidates = Vec::new();
 
-        for pid in sys.processes().keys() {
+        for (pid, process) in sys.processes() {
             let pid_u32 = pid.as_u32();
             if pid_u32 <= 1 {
+                continue;
+            }
+
+            if !scope.permits(Some(process)) {
+                foreign += 1;
                 continue;
             }
 
@@ -521,6 +549,7 @@ fn scan_network_processes_sync() -> Vec<NetProcessCandidate> {
             });
         }
 
+        scope.log_skipped(foreign, "overlay");
         candidates
     }
 }
@@ -531,11 +560,12 @@ fn scan_network_processes_sync_macos() -> Vec<NetProcessCandidate> {
 
     let mut sys = System::new();
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    let scope = OwnerScope::detect(&sys);
 
     let daemon_no_probe = std::env::var(ENV_NO_PROBE_VAR).ok();
     let mut candidates = Vec::new();
 
-    for (pid_u32, raw) in scan_macos_env_candidates(&sys) {
+    for (pid_u32, raw) in scan_macos_env_candidates(&sys, &scope, "overlay") {
         if pid_u32 <= 1 {
             continue;
         }
@@ -640,27 +670,35 @@ fn scan_network_processes_sync_macos() -> Vec<NetProcessCandidate> {
     candidates
 }
 
-/// Collect `(pid, PZ_TUNNEL)` candidates for every process on the system.
+/// Collect `(pid, PZ_TUNNEL)` candidates for the daemon owner's processes.
 ///
 /// This reads each process's env via sysctl(KERN_PROCARGS2) (see
 /// scan_process_env_macos for why, not `ps -E`). Because KERN_PROCARGS2 is a
 /// syscall with no subprocess, reading env per-pid is cheap — the single
 /// batched `ps` call that this used to require for speed is no longer needed.
-/// The old batched `ps -E` path is preserved in scan_macos_env_candidates_ps;
-/// swap the active line below for the commented one to fall back to it.
+/// The old batched `ps -E` path is preserved in scan_macos_env_candidates_ps
+/// as the documented fallback (note it predates owner scoping and does not
+/// filter).
 #[cfg(target_os = "macos")]
-fn scan_macos_env_candidates(sys: &System) -> Vec<(u32, String)> {
-    sys.processes()
-        .keys()
-        .filter_map(|pid| {
+fn scan_macos_env_candidates(sys: &System, scope: &OwnerScope, scan: &str) -> Vec<(u32, String)> {
+    let mut foreign = 0usize;
+    let candidates: Vec<(u32, String)> = sys
+        .processes()
+        .iter()
+        .filter_map(|(pid, process)| {
+            if !scope.permits(Some(process)) {
+                foreign += 1;
+                return None;
+            }
             let pid_u32 = pid.as_u32();
             match scan_process_env(pid_u32, ENV_VAR_NAME) {
                 Some(v) if !v.is_empty() => Some((pid_u32, v)),
                 _ => None,
             }
         })
-        .collect()
-    // scan_macos_env_candidates_ps()
+        .collect();
+    scope.log_skipped(foreign, scan);
+    candidates
 }
 
 /// Old batched candidate collection via a single `ps -axo pid=,command= -wwwE`.
@@ -688,6 +726,8 @@ fn scan_network_processes_sync_windows() -> Vec<NetProcessCandidate> {
 
     let mut sys = System::new();
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    let scope = OwnerScope::detect(&sys);
+    let mut foreign = 0usize;
 
     let daemon_no_probe = std::env::var(ENV_NO_PROBE_VAR).ok();
     let listening_by_pid = discover_all_ports_windows_by_pid();
@@ -695,6 +735,11 @@ fn scan_network_processes_sync_windows() -> Vec<NetProcessCandidate> {
 
     for (pid_u32, listening) in listening_by_pid {
         if pid_u32 <= 1 || listening.is_empty() {
+            continue;
+        }
+
+        if !scope.permits(sys.process(sysinfo::Pid::from_u32(pid_u32))) {
+            foreign += 1;
             continue;
         }
 
@@ -792,6 +837,7 @@ fn scan_network_processes_sync_windows() -> Vec<NetProcessCandidate> {
         });
     }
 
+    scope.log_skipped(foreign, "overlay");
     candidates
 }
 
