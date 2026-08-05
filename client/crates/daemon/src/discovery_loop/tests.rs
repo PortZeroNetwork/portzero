@@ -200,6 +200,48 @@ fn test_build_overlay_table_registers_services() {
 }
 
 #[test]
+fn test_build_overlay_table_serves_the_lowest_pid_claimant() {
+    // Several live backends claiming one name must resolve to a *stable*
+    // winner. Registering them all and letting the last write win made the
+    // serving backend depend on scan order, so a shadowed leftover could start
+    // answering requests without anything changing.
+    use crate::discovery::{DiscoveredNetworkService, ServiceSource};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    let claimant = |pid: u32, port: u16| DiscoveredNetworkService {
+        name: "api".to_string(),
+        domain_template: "api.portzero.local".to_string(),
+        substitutions: Default::default(),
+        real_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+        service_port: port,
+        backend_protocol: None,
+        pid,
+        source: ServiceSource::Process {
+            cwd: Some(std::path::PathBuf::from("/work/app")),
+        },
+        health_path: None,
+    };
+
+    let forward = vec![
+        claimant(300, 8080),
+        claimant(100, 8081),
+        claimant(200, 8082),
+    ];
+    let reversed: Vec<_> = forward.iter().cloned().rev().collect();
+
+    for services in [&forward, &reversed] {
+        let table = build_overlay_table(services, 0);
+        assert_eq!(table.len(), 1);
+        let api = table.get("api").expect("api registered");
+        assert_eq!(
+            api.pid, 100,
+            "lowest pid must serve regardless of scan order"
+        );
+        assert_eq!(api.real_addr.port(), 8081);
+    }
+}
+
+#[test]
 fn test_build_overlay_table_keeps_multi_label_names_distinct() {
     use crate::discovery::{DiscoveredNetworkService, ServiceSource};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};

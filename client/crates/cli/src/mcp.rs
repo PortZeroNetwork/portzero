@@ -92,10 +92,16 @@ fn handle_method(method: &str, params: Option<&Value>) -> Result<Value, String> 
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": { "tools": {} },
             "serverInfo": { "name": "portzero", "version": env!("CARGO_PKG_VERSION") },
-            "instructions": "Runtime truth from the portzero daemon: discovered \
-                services/containers, tunnel domains, health paths, observed \
-                dependency edges, and exercised HTTP routes. Only traffic addressed \
-                via tunnel names is observed."
+            "instructions": format!(
+                "Runtime truth from the portzero daemon: discovered \
+                 services/containers, tunnel domains, health paths, observed \
+                 dependency edges, and exercised HTTP routes. Only traffic addressed \
+                 via tunnel names is observed.\n\n{}\n\n\
+                 A tunnel whose `claimants` field is present is claimed by more than \
+                 one live backend; only the one marked `serving` answers requests, so \
+                 a stale leftover can produce errors that look like application bugs.",
+                crate::PZ_TUNNEL_CONTRACT
+            )
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tool_list() })),
@@ -133,7 +139,9 @@ fn tool_list() -> Value {
         {
             "name": "list_tunnels",
             "description": "Tunnel domains (local overlay and cloud), their resolved URLs, \
-                health paths, and cloud review status.",
+                health paths, and cloud review status. A `claimants` field appears when \
+                several live backends claim one domain, naming which pid is `serving` \
+                and which are `shadowed`.",
             "inputSchema": no_args,
         },
         {
@@ -565,14 +573,34 @@ fn tunnels(config: &DaemonConfig) -> Vec<Value> {
             "status": statuses.get(&r.domain).cloned().unwrap_or_else(|| "published".to_string()),
         }));
     }
-    for r in &overlay.routes {
-        out.push(json!({
-            "domain": r.domain,
+    // Collapsing a contested name to one arbitrary claimant here is how a
+    // shadowed backend stays invisible to an agent debugging through this
+    // server. Report the serving backend, and every claimant it is hiding.
+    for (domain, claimants) in portzero_daemon::claims::group_by_claim(overlay.routes.iter()) {
+        let serving = claimants[0];
+        let mut tunnel = json!({
+            "domain": domain,
             "kind": "local",
-            "url": tunnel_url(&r.domain, r.service_port),
-            "health_path": r.health_path,
+            "url": tunnel_url(&domain, serving.service_port),
+            "health_path": serving.health_path,
             "status": "local",
-        }));
+        });
+        if claimants.len() > 1 {
+            tunnel["claimants"] = Value::Array(
+                claimants
+                    .iter()
+                    .enumerate()
+                    .map(|(index, r)| {
+                        json!({
+                            "pid": r.pid,
+                            "backend": r.real_addr,
+                            "standing": portzero_daemon::claims::standing(index),
+                        })
+                    })
+                    .collect(),
+            );
+        }
+        out.push(tunnel);
     }
     out.sort_by(|a, b| domain_of(a).cmp(domain_of(b)));
     out.dedup_by(|a, b| domain_of(a).eq_ignore_ascii_case(domain_of(b)));

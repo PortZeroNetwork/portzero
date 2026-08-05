@@ -338,29 +338,23 @@ fn print_issues(config: &DaemonConfig) {
 }
 
 fn print_routes(config: &DaemonConfig) {
-    use std::collections::HashMap;
-
     let table = RouteTable::load(&config.routes_path()).unwrap_or_default();
     let overlay = OverlayState::load(&config.overlay_path()).unwrap_or_default();
 
     if table.is_empty() && overlay.is_empty() {
         println!("\nNo routes discovered yet.");
-        println!("Set PZ_TUNNEL on a process or Docker container to expose it.");
+        println!("{}", crate::pz_tunnel_contract());
         return;
     }
 
-    // Find overlay domains claimed by more than one container — those are conflicts.
-    let mut overlay_counts: HashMap<&str, usize> = HashMap::new();
-    for ov in &overlay.routes {
-        *overlay_counts.entry(ov.domain.as_str()).or_insert(0) += 1;
-    }
+    // Group overlay routes by domain so a contested name shows the backend that
+    // actually serves it — not an opaque `[CONFLICT]` row, and not one arbitrary
+    // claimant with the rest silently dropped.
+    let claims = portzero_daemon::claims::group_by_claim(overlay.routes.iter());
 
-    // Build the display rows. Conflicting overlay domains get a single [CONFLICT]
-    // row rather than duplicates that would mislead the reader.
     // Columns: (domain, port, health-path, source).
     let mut rows: Vec<(String, String, String, String)> = Vec::new();
-    let mut seen_conflict_domains: std::collections::HashSet<&str> =
-        std::collections::HashSet::new();
+    let mut contested: Vec<&String> = Vec::new();
 
     for route in table.routes.values() {
         rows.push((
@@ -371,25 +365,24 @@ fn print_routes(config: &DaemonConfig) {
         ));
     }
 
-    for ov in &overlay.routes {
-        let count = overlay_counts[ov.domain.as_str()];
-        if count > 1 {
-            if seen_conflict_domains.insert(ov.domain.as_str()) {
-                rows.push((
-                    ov.domain.clone(),
-                    "----".into(),
-                    "-".into(),
-                    "[CONFLICT]".into(),
-                ));
-            }
+    for (domain, claimants) in &claims {
+        let serving = claimants[0];
+        let source = if claimants.len() > 1 {
+            contested.push(domain);
+            format!(
+                "{} [serving; {} shadowed]",
+                format_source(&serving.source, serving.pid),
+                claimants.len() - 1
+            )
         } else {
-            rows.push((
-                ov.domain.clone(),
-                ov.service_port.to_string(),
-                health_cell(ov.health_path.as_deref()),
-                format_source(&ov.source, ov.pid),
-            ));
-        }
+            format_source(&serving.source, serving.pid)
+        };
+        rows.push((
+            domain.clone(),
+            serving.service_port.to_string(),
+            health_cell(serving.health_path.as_deref()),
+            source,
+        ));
     }
 
     rows.sort_by(|a, b| a.0.cmp(&b.0));
@@ -459,28 +452,30 @@ fn print_routes(config: &DaemonConfig) {
         }
     }
 
-    // Print conflict detail blocks after the table.
-    let conflict_domains: Vec<&str> = seen_conflict_domains.into_iter().collect();
-    if !conflict_domains.is_empty() {
+    // Print the detail block for every contested name after the table. Naming
+    // the serving backend is the point: without it, a stale leftover can answer
+    // requests and the resulting errors look like application bugs.
+    if !contested.is_empty() {
         println!();
-        println!("Conflicts detected — the following .portzero.local names are ambiguous:");
-        for domain in &conflict_domains {
-            let claimants: Vec<String> = overlay
-                .routes
-                .iter()
-                .filter(|r| r.domain == *domain)
-                .map(|r| format_source(&r.source, r.pid))
-                .collect();
+        println!("Ambiguous names — more than one live backend claims these tunnels:");
+        for domain in &contested {
+            let claimants = &claims[*domain];
             println!();
-            println!("  ! {domain} claimed by {}:", claimants.len());
-            for c in &claimants {
-                println!("      - {c}");
+            println!("  ! {domain} claimed by {} backends:", claimants.len());
+            for (index, claimant) in claimants.iter().enumerate() {
+                println!(
+                    "      - {} on {} [{}]",
+                    format_source(&claimant.source, claimant.pid),
+                    claimant.real_addr,
+                    portzero_daemon::claims::standing(index),
+                );
             }
         }
         println!();
         println!(
-            "  Fix: stop duplicate containers or give each a unique PZ_TUNNEL value,\n\
-             e.g. PZ_TUNNEL=web-{{branch}}.portzero.local"
+            "  Only the [serving] backend receives traffic. If the others are leftovers\n  \
+             from an earlier run, stop them by pid. If they are meant to coexist, give each\n  \
+             a unique PZ_TUNNEL value, e.g. PZ_TUNNEL=web-{{branch}}.portzero.local"
         );
     }
 

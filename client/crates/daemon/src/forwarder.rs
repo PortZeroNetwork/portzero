@@ -45,6 +45,26 @@ pub async fn forward_request(
     let url = format!("http://127.0.0.1:{}{}", local_port, path);
     debug!(request_id, %method, %url, %host, "Forwarding request to local service");
 
+    // The edge protocol carries whole requests and responses, so there is no
+    // way to hand a Cloud tunnel's connection over to a WebSocket. The hop-by-hop
+    // filter below would strip `Upgrade`/`Connection` and forward the handshake
+    // as an ordinary GET, which the local service answers 200 — leaving the
+    // client waiting on a socket that will never open. Say so instead.
+    if is_websocket_upgrade(headers) {
+        warn!(request_id, %host, "Rejected WebSocket upgrade over a Cloud tunnel");
+        return Ok(not_implemented(
+            request_id,
+            format!(
+                "Cloud tunnels ({host}) forward HTTP requests and responses only, so this \
+                 WebSocket upgrade cannot be completed.\n\n\
+                 Local tunnels do support WebSockets: a *.portzero.local name proxies raw \
+                 TCP, so live reload, HMR, and any other WebSocket traffic work over it. \
+                 Point the WebSocket at a Local tunnel, or reach the service directly on \
+                 127.0.0.1:{local_port} while keeping the Cloud tunnel for HTTP."
+            ),
+        ));
+    }
+
     let req_method = reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::GET);
 
     let mut builder = FORWARD_CLIENT.request(req_method, &url);
@@ -169,6 +189,42 @@ fn is_filtered_request_header(key: &str, connection_headers: &HashSet<String>) -
         )
 }
 
+/// Whether these request headers are a WebSocket handshake.
+///
+/// Both halves are required by RFC 6455 (`Connection: Upgrade` plus
+/// `Upgrade: websocket`), and `Connection` is a comma-separated list, so match
+/// on tokens rather than the whole value.
+fn is_websocket_upgrade(headers: &[(String, String)]) -> bool {
+    let header = |name: &str| {
+        headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    };
+
+    let upgrades_to_websocket = header("upgrade").is_some_and(|value| {
+        value
+            .split(',')
+            .any(|t| t.trim().eq_ignore_ascii_case("websocket"))
+    });
+    let connection_upgrade = header("connection").is_some_and(|value| {
+        value
+            .split(',')
+            .any(|t| t.trim().eq_ignore_ascii_case("upgrade"))
+    });
+
+    upgrades_to_websocket && connection_upgrade
+}
+
+fn not_implemented(request_id: u64, detail: String) -> ClientMessage {
+    ClientMessage::HttpResponse {
+        request_id,
+        status: 501,
+        headers: vec![("Content-Type".into(), "text/plain".into())],
+        body: detail.into_bytes(),
+    }
+}
+
 fn bad_gateway(request_id: u64, detail: String) -> ClientMessage {
     ClientMessage::HttpResponse {
         request_id,
@@ -204,6 +260,76 @@ mod tests {
             "authorization",
             &connection_headers
         ));
+    }
+
+    #[test]
+    fn detects_websocket_handshakes_and_nothing_else() {
+        let headers = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+
+        assert!(is_websocket_upgrade(&headers(&[
+            ("Upgrade", "websocket"),
+            ("Connection", "Upgrade"),
+        ])));
+        // Real clients send mixed case and multi-token Connection values.
+        assert!(is_websocket_upgrade(&headers(&[
+            ("upgrade", "WebSocket"),
+            ("connection", "keep-alive, Upgrade"),
+        ])));
+        // Half a handshake is not a handshake — forward it as ordinary HTTP.
+        assert!(!is_websocket_upgrade(&headers(&[("Upgrade", "websocket")])));
+        assert!(!is_websocket_upgrade(&headers(&[(
+            "Connection",
+            "Upgrade"
+        )])));
+        assert!(!is_websocket_upgrade(&headers(&[(
+            "Connection",
+            "keep-alive"
+        )])));
+        assert!(!is_websocket_upgrade(&[]));
+    }
+
+    #[tokio::test]
+    async fn websocket_upgrade_over_a_cloud_tunnel_is_refused_with_guidance() {
+        // Nothing listens on this port: reaching the 501 proves the handshake
+        // is rejected before any forwarding is attempted, rather than being
+        // stripped and answered as a plain GET.
+        let result = forward_request(
+            7,
+            "GET",
+            "/socket",
+            "api.alice.tunnel.portzero.cloud",
+            &[
+                ("Upgrade".to_string(), "websocket".to_string()),
+                ("Connection".to_string(), "Upgrade".to_string()),
+            ],
+            &[],
+            19997,
+        )
+        .await
+        .unwrap();
+
+        match result {
+            ClientMessage::HttpResponse {
+                request_id,
+                status,
+                body,
+                ..
+            } => {
+                assert_eq!(request_id, 7);
+                assert_eq!(status, 501);
+                let body = String::from_utf8_lossy(&body);
+                // The message must say where WebSockets *do* work, not just
+                // that this failed.
+                assert!(body.contains("portzero.local"), "{body}");
+                assert!(body.contains("19997"), "{body}");
+            }
+            other => panic!("Expected HttpResponse, got {:?}", other),
+        }
     }
 
     #[tokio::test]

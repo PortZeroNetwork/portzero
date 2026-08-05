@@ -145,7 +145,7 @@ impl Issue {
     pub fn summary(&self) -> String {
         match self {
             Issue::DuplicateName { name, claimants } => format!(
-                "Duplicate .portzero.local name \"{}\" claimed by {} contexts: {}",
+                "Ambiguous .portzero.local name \"{}\" claimed by {} live backends: {}",
                 name,
                 claimants.len(),
                 claimants.join(", ")
@@ -221,9 +221,15 @@ impl Issue {
     pub fn fix_hint(&self) -> String {
         match self {
             Issue::DuplicateName { name, .. } => format!(
-                "Give each worktree a unique PZ_TUNNEL name — e.g. use a template \
-                 like \"{name}-{{branch}}.portzero.local\" or \"{name}-{{worktree}}.portzero.local\" \
-                 so the resolved name differs per checkout."
+                "Only the backend marked [serving] answers requests for \
+                 \"{name}.portzero.local\"; the others receive no traffic, so a \
+                 stale one can serve responses that look like application bugs. \
+                 If the extra backends are leftovers from an earlier run, stop \
+                 them (`portzero status` lists each pid). If they are meant to \
+                 coexist, give each a unique PZ_TUNNEL — e.g. a template like \
+                 \"{name}-{{branch}}.portzero.local\" or \
+                 \"{name}-{{worktree}}.portzero.local\" so the resolved name \
+                 differs per checkout."
             ),
             Issue::DuplicateCloudUrl { url, .. } => {
                 // Show the first label of the URL in the templated suggestion so
@@ -423,20 +429,54 @@ where
         .collect()
 }
 
-/// Detect duplicate overlay names across distinct process contexts.
+/// Detect overlay names claimed by more than one live backend.
 ///
-/// Returns one [`Issue::DuplicateName`] per name that is claimed by two or more
-/// *distinct* contexts in this scan. Pure — operates only on the in-memory
-/// service list, so it is fully unit-testable without privileges or shell-out.
+/// Returns one [`Issue::DuplicateName`] per contested name, listing every
+/// claimant best-first and marking which one actually serves traffic (see
+/// [`crate::claims`]).
+///
+/// Two claimants are distinct when they are *different live backends*: a
+/// different listening address, or a different context (worktree / container).
+/// Grouping by context alone — the previous rule — hid the most expensive case
+/// there is: several leaked backends from repeated test runs in a single
+/// directory, which share a cwd and so collapsed to one context. Requests were
+/// answered by an arbitrary one of them with nothing reported anywhere.
+///
+/// Pure — operates only on the in-memory service list, so it is fully
+/// unit-testable without privileges or shell-out.
 pub fn detect_duplicate_names(services: &[DiscoveredNetworkService]) -> Vec<Issue> {
-    duplicate_claimants(
-        services
-            .iter()
-            .map(|svc| (svc.name.clone(), svc.pid, &svc.source)),
-    )
-    .into_iter()
-    .map(|(name, claimants)| Issue::DuplicateName { name, claimants })
-    .collect()
+    crate::claims::group_by_claim(services.iter())
+        .into_iter()
+        .filter_map(|(name, claimants)| {
+            let claimants = describe_ranked_claimants(&claimants);
+            (claimants.len() >= 2).then_some(Issue::DuplicateName { name, claimants })
+        })
+        .collect()
+}
+
+/// Render a best-first claimant list for display, dropping entries that are the
+/// same backend seen twice and tagging each survivor with its standing.
+///
+/// Identity is `(listening address, context)`: one process inherited by a child,
+/// or a single backend picked up by two scan paths, is one claimant — flagging
+/// that would be noise. Two processes on different ports are two claimants even
+/// from the same directory, which is the leaked-backend case.
+fn describe_ranked_claimants(claimants: &[&DiscoveredNetworkService]) -> Vec<String> {
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for svc in claimants {
+        let identity = format!("{}|{:?}", svc.real_addr, context_key(&svc.source));
+        if !seen.insert(identity) {
+            continue;
+        }
+        let standing = crate::claims::standing(out.len());
+        out.push(format!(
+            "{} on {} [{standing}]",
+            describe_claimant(svc.pid, &svc.source),
+            svc.real_addr
+        ));
+    }
+    out
 }
 
 /// Detect two or more contexts advertising the *same cloud tunnel URL* on this
