@@ -57,10 +57,7 @@ pub(super) fn write_overlay_state(
 /// intermittent application bug.
 ///
 /// This is pure (no TUN / no privileges required) so it can be unit-tested.
-pub(super) fn build_overlay_table(
-    services: &[DiscoveredNetworkService],
-    mgmt_port: u16,
-) -> ServiceTable {
+pub fn build_overlay_table(services: &[DiscoveredNetworkService], mgmt_port: u16) -> ServiceTable {
     let mut table = ServiceTable::new();
     if mgmt_port != 0 {
         let backend = std::net::SocketAddr::from(([127, 0, 0, 1], mgmt_port));

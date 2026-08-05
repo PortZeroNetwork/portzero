@@ -90,6 +90,11 @@ pub use cloud_state::{
 };
 pub use config::DaemonConfig;
 pub use lifecycle::{read_daemon_pid, remove_pid_file, stop_daemon};
+/// Exported so the integration tests under `tests/` can drive the real overlay
+/// table the daemon builds, rather than a reimplementation of it. Which backend
+/// serves a name claimed by several is decided here; a test that rebuilt that
+/// choice itself would assert nothing about production.
+pub use overlay::build_overlay_table;
 
 use connection::{
     handle_cloud_auth_failure, initial_cloud_connect, maybe_connect_cloud, maybe_recheck_auth,
@@ -119,8 +124,6 @@ use crate::route_table::RouteChanges;
 use cloud_state::write_cloud_state;
 #[cfg(test)]
 use config::FileConfig;
-#[cfg(test)]
-use overlay::build_overlay_table;
 
 /// Tracks routes whose owning process has exited, giving them a grace period
 /// before removal.
