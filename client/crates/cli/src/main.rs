@@ -512,17 +512,23 @@ async fn run() -> anyhow::Result<()> {
         return Ok(());
     };
 
+    dispatch(command).await?;
+
+    // Wait briefly for the update check to print its notice (if any).
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), update_handle).await;
+
+    Ok(())
+}
+
+/// Run one subcommand. Grouped subcommands delegate to the small dispatchers
+/// below rather than nesting their matches here, which keeps this function
+/// within the repo's cognitive-complexity budget as commands are added.
+async fn dispatch(command: Command) -> anyhow::Result<()> {
     match command {
         Command::Start {
             foreground,
             no_browser,
-        } => {
-            if foreground {
-                daemon::start_foreground().await?;
-            } else {
-                daemon::start(!no_browser).await?;
-            }
-        }
+        } => start_daemon(foreground, no_browser).await?,
         Command::Stop => daemon::stop()?,
         Command::Restart => daemon::restart().await?,
         Command::Status => daemon::status().await?,
@@ -549,15 +555,7 @@ async fn run() -> anyhow::Result<()> {
             github_repo,
             team,
             repo,
-        } => {
-            if github_repo {
-                // Handles its own daemon restart (only when one is running).
-                github_repo_login::run(team, repo).await?;
-            } else {
-                auth::login(interactive, email, name).await?;
-                daemon::restart().await?;
-            }
-        }
+        } => login(interactive, email, name, github_repo, team, repo).await?,
         Command::Logout => auth::logout()?,
         Command::Purge => purge::run()?,
         Command::Whoami => auth::whoami().await?,
@@ -593,25 +591,46 @@ async fn run() -> anyhow::Result<()> {
             } => agents::setup(dry_run, repo_only, machine_only)?,
             AgentsCommand::CostHook => agents::run_cost_hook()?,
         },
-        Command::Daemon(cmd) => match cmd {
-            DaemonCommand::Start {
-                foreground,
-                no_browser,
-            } => {
-                if foreground {
-                    daemon::start_foreground().await?;
-                } else {
-                    daemon::start(!no_browser).await?;
-                }
-            }
-            DaemonCommand::Stop => daemon::stop()?,
-            DaemonCommand::Restart => daemon::restart().await?,
-            DaemonCommand::Status => daemon::status().await?,
-        },
+        Command::Daemon(cmd) => run_daemon_command(cmd).await?,
     }
 
-    // Wait briefly for the update check to print its notice (if any).
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), update_handle).await;
-
     Ok(())
+}
+
+/// Shared by the top-level `start` and the grouped `daemon start`, which must
+/// stay behaviorally identical.
+async fn start_daemon(foreground: bool, no_browser: bool) -> anyhow::Result<()> {
+    if foreground {
+        daemon::start_foreground().await
+    } else {
+        daemon::start(!no_browser).await
+    }
+}
+
+async fn login(
+    interactive: bool,
+    email: Option<String>,
+    name: Option<String>,
+    github_repo: bool,
+    team: Option<String>,
+    repo: Option<String>,
+) -> anyhow::Result<()> {
+    if github_repo {
+        // Handles its own daemon restart (only when one is running).
+        return github_repo_login::run(team, repo).await;
+    }
+    auth::login(interactive, email, name).await?;
+    daemon::restart().await
+}
+
+async fn run_daemon_command(cmd: DaemonCommand) -> anyhow::Result<()> {
+    match cmd {
+        DaemonCommand::Start {
+            foreground,
+            no_browser,
+        } => start_daemon(foreground, no_browser).await,
+        DaemonCommand::Stop => daemon::stop(),
+        DaemonCommand::Restart => daemon::restart().await,
+        DaemonCommand::Status => daemon::status().await,
+    }
 }
