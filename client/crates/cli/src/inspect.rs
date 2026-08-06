@@ -43,35 +43,60 @@ fn render(config: &DaemonConfig) -> String {
 
     let _ = writeln!(out, "TUNNELS");
     if table.routes.is_empty() && overlay.routes.is_empty() {
-        let _ = writeln!(
-            out,
-            "  (none discovered — set PZ_TUNNEL on a process or container)"
-        );
+        let _ = writeln!(out, "  (none discovered)");
+        let _ = writeln!(out);
+        for line in crate::pz_tunnel_contract().lines() {
+            let _ = writeln!(out, "  {line}");
+        }
     } else {
-        let mut rows: Vec<(String, String, String, String)> = Vec::new();
+        // (domain, url, health, serving source, shadowed sources)
+        let mut rows: Vec<(String, String, String, String, Vec<String>)> = Vec::new();
         for r in table.routes.values() {
             rows.push((
                 r.domain.clone(),
                 tunnel_url(&r.domain, r.port),
                 r.health_path.clone().unwrap_or_else(|| "-".to_string()),
                 describe_source(&r.source, r.pid),
+                Vec::new(),
             ));
         }
-        for r in &overlay.routes {
+        // A contested overlay name previously collapsed to one arbitrary
+        // claimant here, which is how a shadowed backend stays invisible to
+        // whoever is reading `inspect` to debug it. Report every claimant and
+        // which one serves.
+        for (domain, claimants) in portzero_daemon::claims::group_by_claim(overlay.routes.iter()) {
+            let serving = claimants[0];
             rows.push((
-                r.domain.clone(),
-                tunnel_url(&r.domain, r.service_port),
-                r.health_path.clone().unwrap_or_else(|| "-".to_string()),
-                describe_source(&r.source, r.pid),
+                domain.clone(),
+                tunnel_url(&domain, serving.service_port),
+                serving
+                    .health_path
+                    .clone()
+                    .unwrap_or_else(|| "-".to_string()),
+                describe_source(&serving.source, serving.pid),
+                claimants[1..]
+                    .iter()
+                    .map(|r| format!("{} on {}", describe_source(&r.source, r.pid), r.real_addr))
+                    .collect(),
             ));
         }
         rows.sort_by(|a, b| a.0.cmp(&b.0));
         rows.dedup_by(|a, b| a.0.eq_ignore_ascii_case(&b.0));
-        for (domain, url, health, source) in &rows {
+        for (domain, url, health, source, shadowed) in &rows {
             let _ = writeln!(out, "  {domain}");
             let _ = writeln!(out, "      url:    {url}");
             let _ = writeln!(out, "      health: {health}");
-            let _ = writeln!(out, "      source: {source}");
+            if shadowed.is_empty() {
+                let _ = writeln!(out, "      source: {source}");
+            } else {
+                let _ = writeln!(out, "      source: {source}  [serving]");
+                for other in shadowed {
+                    let _ = writeln!(
+                        out,
+                        "      also:   {other}  [shadowed — receives no traffic]"
+                    );
+                }
+            }
         }
     }
     out.push('\n');
@@ -259,6 +284,60 @@ mod tests {
         assert!(out.contains("health: /healthz"));
         assert!(out.contains("health: -"));
         assert!(out.contains("url:    http://zeta.portzero.local:8080"));
+        cleanup(&config);
+    }
+
+    #[test]
+    fn render_names_every_claimant_of_a_contested_name() {
+        // Collapsing to one claimant is what let a leaked backend serve
+        // requests invisibly — `inspect` is where someone debugging that goes.
+        let config = temp_config("contested");
+        let state = portzero_daemon::route_table::OverlayState {
+            overlay_active: true,
+            routes: vec![
+                OverlayRoute {
+                    domain: "api.portzero.local".to_string(),
+                    domain_template: "api.portzero.local".to_string(),
+                    substitutions: Default::default(),
+                    service_port: 9999,
+                    backend_protocol: None,
+                    real_addr: "127.0.0.1:9999".to_string(),
+                    health_path: None,
+                    pid: 900,
+                    source: ServiceSource::Process { cwd: None },
+                },
+                OverlayRoute {
+                    domain: "api.portzero.local".to_string(),
+                    domain_template: "api.portzero.local".to_string(),
+                    substitutions: Default::default(),
+                    service_port: 8080,
+                    backend_protocol: None,
+                    real_addr: "127.0.0.1:8080".to_string(),
+                    health_path: None,
+                    pid: 100,
+                    source: ServiceSource::Process { cwd: None },
+                },
+            ],
+        };
+        state.save(&config.overlay_path()).unwrap();
+
+        let out = render(&config);
+        assert!(
+            out.contains("url:    http://api.portzero.local:8080"),
+            "{out}"
+        );
+        assert!(out.contains("process pid 100"), "{out}");
+        assert!(out.contains("[serving]"), "{out}");
+        assert!(out.contains("process pid 900"), "{out}");
+        assert!(out.contains("shadowed"), "{out}");
+        cleanup(&config);
+    }
+
+    #[test]
+    fn render_states_the_registration_contract_when_nothing_is_discovered() {
+        let config = temp_config("contract");
+        let out = render(&config);
+        assert!(out.contains("PZ_TUNNEL="), "{out}");
         cleanup(&config);
     }
 

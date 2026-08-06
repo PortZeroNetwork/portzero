@@ -48,18 +48,24 @@ pub(super) fn write_overlay_state(
 /// When `mgmt_port != 0` the management service ("portzero") is injected as the
 /// first entry, mapping to `127.0.0.1:<mgmt_port>` on virtual port 80.
 ///
+/// A name claimed by several live backends resolves through
+/// [`crate::claims::group_by_claim`], so exactly one of them is registered and
+/// *which* one is the same answer `portzero status`, `portzero inspect`, and the
+/// MCP view report. Registering them all and letting the last write win — the
+/// previous behavior — made the serving backend depend on scan iteration order,
+/// so a shadowed leftover process could answer requests and look like an
+/// intermittent application bug.
+///
 /// This is pure (no TUN / no privileges required) so it can be unit-tested.
-pub(super) fn build_overlay_table(
-    services: &[DiscoveredNetworkService],
-    mgmt_port: u16,
-) -> ServiceTable {
+pub fn build_overlay_table(services: &[DiscoveredNetworkService], mgmt_port: u16) -> ServiceTable {
     let mut table = ServiceTable::new();
     if mgmt_port != 0 {
         let backend = std::net::SocketAddr::from(([127, 0, 0, 1], mgmt_port));
         table.register("portzero".to_string(), backend, 80, 0);
         table.register("portzero-api".to_string(), backend, 80, 0);
     }
-    for svc in services {
+    for claimants in crate::claims::group_by_claim(services.iter()).into_values() {
+        let svc = claimants[0];
         table.register_with_backend_protocol(
             svc.name.clone(),
             svc.real_addr,

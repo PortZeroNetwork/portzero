@@ -36,6 +36,15 @@ pub fn run() {
         "Next:   {}",
         next_step(set_up, daemon_pid.is_some(), tunnels.len())
     );
+
+    // With nothing registered, the missing piece is almost never a command —
+    // it is knowing that PZ_TUNNEL is the whole registration story.
+    if tunnels.is_empty() {
+        println!();
+        println!("{}", crate::pz_tunnel_contract());
+    }
+
+    println!();
     println!("Run `portzero --help` for all commands.");
 }
 

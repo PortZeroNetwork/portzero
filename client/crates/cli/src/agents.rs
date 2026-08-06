@@ -33,6 +33,20 @@ const END_MARKER: &str = "<!-- portzero:end -->";
 const INSTRUCTIONS_BODY: &str = "\
 ## Port Zero MCP
 
+**How a service registers:** set `PZ_TUNNEL=<name>.portzero.local` in the \
+environment of any process or Docker container that listens on a TCP port, \
+before launching it. The daemon discovers it, claims the name, and routes to \
+whatever port it bound — there is no registration call or config file, and the \
+hostname is usable before the process starts, so nothing has to wait on \
+discovery. Bind port 0 and let the daemon find the real port rather than \
+hardcoding one. Add `PZ_HEALTH_PATH=/health` and `portzero wait <domain> \
+--healthy` becomes a readiness gate. Use `<name>.tunnel.portzero.cloud` for a \
+public Cloud tunnel.
+
+WebSockets work over Local (`*.portzero.local`) tunnels — the overlay proxies \
+raw TCP, so Vite HMR and live reload are fine. Cloud tunnels forward HTTP \
+requests and responses only and answer a WebSocket handshake with 501.
+
 This machine has the Port Zero MCP server registered (`portzero mcp`). It \
 exposes the local dev daemon's live runtime truth over stdio — prefer these \
 tools over guessing ports or grepping `.env` files:
@@ -42,6 +56,9 @@ tools over guessing ports or grepping `.env` files:
 - `list_tunnels` — tunnel domains (Local + Cloud), URLs, health paths
 - `observed_edges` — who-talks-to-whom dependency edges observed at runtime
 - `exercised_routes` — HTTP routes actually hit per tunnel (smoke-test list)
+- a tunnel with a `claimants` field is claimed by several live backends; only \
+the one marked `serving` answers requests, so a leftover from an earlier run \
+can return errors that look like application bugs
 - `list_feedback` / `propose_fix` — portzero.cloud review threads (requires `portzero login`)
 - `submit_bug_report` — report a bug in Port Zero itself to the team (requires `portzero login`)
 - `submit_feature_request` — request a Port Zero feature, but only when it would make things \

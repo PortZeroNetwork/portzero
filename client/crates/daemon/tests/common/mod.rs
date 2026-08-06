@@ -55,6 +55,30 @@ pub async fn spawn_echo_backend() -> SocketAddr {
     addr
 }
 
+/// Spawn a TCP backend that answers every connection with `identity` and
+/// nothing else, bound to an ephemeral port.
+///
+/// An echo backend cannot tell you *which* backend answered — the reply is
+/// whatever you sent. When several backends claim one tunnel name, that is
+/// precisely the question, so this one names itself instead.
+pub async fn spawn_identifying_backend(identity: &'static str) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut sock, _) = match listener.accept().await {
+                Ok(p) => p,
+                Err(_) => break,
+            };
+            tokio::spawn(async move {
+                let _ = sock.write_all(identity.as_bytes()).await;
+                let _ = sock.flush().await;
+            });
+        }
+    });
+    addr
+}
+
 /// Send a single A query for `name` to the DNS server at `dns_addr` and return
 /// the first A record's address, if any. Bounded by `TEST_TIMEOUT`.
 pub async fn dns_query_a(dns_addr: SocketAddr, name: &str) -> Option<Ipv4Addr> {

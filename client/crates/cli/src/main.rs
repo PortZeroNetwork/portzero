@@ -78,6 +78,40 @@ pub(crate) fn with_temp_home<T>(label: &str, f: impl FnOnce(&std::path::Path) ->
     out
 }
 
+/// How a service registers itself — the one thing every other command assumes
+/// you already know.
+///
+/// Every query command (`status`, `url`, `inspect`, `wait`, the MCP tools)
+/// documents how to *read* the daemon's view, and none of them said how an entry
+/// gets there in the first place. Stated once here and reused by `--help`, the
+/// bare-`portzero` front door, `status` with nothing registered, `inspect`, and
+/// the MCP server instructions, so it cannot be missed on whichever surface you
+/// reach for first.
+pub(crate) const PZ_TUNNEL_CONTRACT: &str = "\
+Registration is one environment variable: set PZ_TUNNEL=<name>.portzero.local on any \
+process or Docker container that listens on a TCP port, and the daemon discovers it, \
+claims the name, and routes to whatever port it bound. There is no registration call, \
+config file, or startup ordering to get right — the hostname is yours before the \
+process starts.
+
+    PZ_TUNNEL=api.myapp.portzero.local npm run dev
+    # then: http://api.myapp.portzero.local
+
+Set PZ_HEALTH_PATH=/health too, and `portzero wait --healthy` will poll readiness.";
+
+pub(crate) fn pz_tunnel_contract() -> &'static str {
+    PZ_TUNNEL_CONTRACT
+}
+
+/// `portzero --help`. The subcommand list documents how to query the daemon
+/// thoroughly; this leads with how a service gets into it at all.
+static LONG_ABOUT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "Eliminate port conflicts: stable *.portzero.local and cloud tunnel names for \
+         your dev services.\n\n{PZ_TUNNEL_CONTRACT}"
+    )
+});
+
 mod agents;
 mod api_client;
 mod auth;
@@ -109,7 +143,8 @@ mod wait;
 #[command(
     name = "portzero",
     version,
-    about = "Eliminate port conflicts: stable *.portzero.local and cloud tunnel names for your dev services"
+    about = "Eliminate port conflicts: stable *.portzero.local and cloud tunnel names for your dev services",
+    long_about = LONG_ABOUT.as_str()
 )]
 struct Cli {
     /// Optional: with no subcommand, `portzero` prints a short state-aware
@@ -400,8 +435,61 @@ enum AutostartCommand {
     Status,
 }
 
+#[cfg(test)]
+mod exit_code_tests {
+    use super::*;
+
+    #[test]
+    fn unknown_tunnel_gets_its_own_code() {
+        let err: anyhow::Error =
+            export::NoSuchTunnel("no tunnel named 'web.portzero.local'".to_string()).into();
+        assert_eq!(exit_code_for(&err), exit::NO_SUCH_TUNNEL);
+    }
+
+    #[test]
+    fn every_other_failure_still_exits_one() {
+        // The distinct code only means "not registered"; conflating it with
+        // other failures would make a `set -e` script retry things that will
+        // never succeed.
+        let err = anyhow::anyhow!("the daemon state directory is unreadable");
+        assert_eq!(exit_code_for(&err), 1);
+    }
+}
+
+/// Exit codes beyond the conventional 0 (success) and 1 (anything failed), so a
+/// `set -e` script can branch on *why* a command failed without parsing stderr
+/// or treating empty stdout as a sentinel.
+pub(crate) mod exit {
+    /// The requested tunnel is not known to the daemon. Distinct from 1, which
+    /// still covers every other failure (stopped daemon, unreadable state,
+    /// network error), so "not registered yet" is safe to retry on and the rest
+    /// are not.
+    pub const NO_SUCH_TUNNEL: u8 = 4;
+}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> std::process::ExitCode {
+    match run().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(err) => {
+            // Matches what `fn main() -> anyhow::Result<()>` printed before:
+            // anyhow's Termination impl formats the error chain with Debug.
+            eprintln!("Error: {err:?}");
+            std::process::ExitCode::from(exit_code_for(&err))
+        }
+    }
+}
+
+/// The exit code for a failed command. Everything without a dedicated code
+/// exits 1, exactly as it did before codes were introduced.
+fn exit_code_for(err: &anyhow::Error) -> u8 {
+    if err.downcast_ref::<export::NoSuchTunnel>().is_some() {
+        return exit::NO_SUCH_TUNNEL;
+    }
+    1
+}
+
+async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -424,17 +512,23 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     };
 
+    dispatch(command).await?;
+
+    // Wait briefly for the update check to print its notice (if any).
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), update_handle).await;
+
+    Ok(())
+}
+
+/// Run one subcommand. Grouped subcommands delegate to the small dispatchers
+/// below rather than nesting their matches here, which keeps this function
+/// within the repo's cognitive-complexity budget as commands are added.
+async fn dispatch(command: Command) -> anyhow::Result<()> {
     match command {
         Command::Start {
             foreground,
             no_browser,
-        } => {
-            if foreground {
-                daemon::start_foreground().await?;
-            } else {
-                daemon::start(!no_browser).await?;
-            }
-        }
+        } => start_daemon(foreground, no_browser).await?,
         Command::Stop => daemon::stop()?,
         Command::Restart => daemon::restart().await?,
         Command::Status => daemon::status().await?,
@@ -461,15 +555,7 @@ async fn main() -> anyhow::Result<()> {
             github_repo,
             team,
             repo,
-        } => {
-            if github_repo {
-                // Handles its own daemon restart (only when one is running).
-                github_repo_login::run(team, repo).await?;
-            } else {
-                auth::login(interactive, email, name).await?;
-                daemon::restart().await?;
-            }
-        }
+        } => login(interactive, email, name, github_repo, team, repo).await?,
         Command::Logout => auth::logout()?,
         Command::Purge => purge::run()?,
         Command::Whoami => auth::whoami().await?,
@@ -505,25 +591,46 @@ async fn main() -> anyhow::Result<()> {
             } => agents::setup(dry_run, repo_only, machine_only)?,
             AgentsCommand::CostHook => agents::run_cost_hook()?,
         },
-        Command::Daemon(cmd) => match cmd {
-            DaemonCommand::Start {
-                foreground,
-                no_browser,
-            } => {
-                if foreground {
-                    daemon::start_foreground().await?;
-                } else {
-                    daemon::start(!no_browser).await?;
-                }
-            }
-            DaemonCommand::Stop => daemon::stop()?,
-            DaemonCommand::Restart => daemon::restart().await?,
-            DaemonCommand::Status => daemon::status().await?,
-        },
+        Command::Daemon(cmd) => run_daemon_command(cmd).await?,
     }
 
-    // Wait briefly for the update check to print its notice (if any).
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), update_handle).await;
-
     Ok(())
+}
+
+/// Shared by the top-level `start` and the grouped `daemon start`, which must
+/// stay behaviorally identical.
+async fn start_daemon(foreground: bool, no_browser: bool) -> anyhow::Result<()> {
+    if foreground {
+        daemon::start_foreground().await
+    } else {
+        daemon::start(!no_browser).await
+    }
+}
+
+async fn login(
+    interactive: bool,
+    email: Option<String>,
+    name: Option<String>,
+    github_repo: bool,
+    team: Option<String>,
+    repo: Option<String>,
+) -> anyhow::Result<()> {
+    if github_repo {
+        // Handles its own daemon restart (only when one is running).
+        return github_repo_login::run(team, repo).await;
+    }
+    auth::login(interactive, email, name).await?;
+    daemon::restart().await
+}
+
+async fn run_daemon_command(cmd: DaemonCommand) -> anyhow::Result<()> {
+    match cmd {
+        DaemonCommand::Start {
+            foreground,
+            no_browser,
+        } => start_daemon(foreground, no_browser).await,
+        DaemonCommand::Stop => daemon::stop(),
+        DaemonCommand::Restart => daemon::restart().await,
+        DaemonCommand::Status => daemon::status().await,
+    }
 }

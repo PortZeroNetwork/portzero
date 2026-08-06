@@ -5,7 +5,7 @@
 //! Playwright fixture package talks to the daemon directly and is the preferred
 //! integration.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 
 use portzero_daemon::discovery::is_local_overlay_domain;
 use portzero_daemon::discovery_loop::DaemonConfig;
@@ -70,11 +70,15 @@ pub fn discovered_tunnels(config: &DaemonConfig) -> Vec<TunnelUrl> {
             health_path: route.health_path.clone(),
         });
     }
-    for ov in &overlay.routes {
+    // When several live backends claim one overlay name, report the one the
+    // daemon actually routes to. Taking whichever entry happened to sort first
+    // could name a shadowed backend's port and send scripts at the wrong one.
+    for (domain, claimants) in portzero_daemon::claims::group_by_claim(overlay.routes.iter()) {
+        let serving = claimants[0];
         out.push(TunnelUrl {
-            url: tunnel_url(&ov.domain, ov.service_port),
-            domain: ov.domain.clone(),
-            health_path: ov.health_path.clone(),
+            url: tunnel_url(&domain, serving.service_port),
+            domain,
+            health_path: serving.health_path.clone(),
         });
     }
 
@@ -91,11 +95,30 @@ pub fn lookup_tunnel(config: &DaemonConfig, domain: &str) -> Option<TunnelUrl> {
         .find(|t| t.domain.eq_ignore_ascii_case(target))
 }
 
+/// The requested tunnel is not known to the daemon.
+///
+/// A distinct error type so the process can exit with
+/// [`crate::exit::NO_SUCH_TUNNEL`] rather than the catch-all 1. A `set -e`
+/// script gating on "is this tunnel up yet?" needs to tell *not registered*
+/// apart from a stopped daemon or an unreadable state directory, and testing
+/// for empty stdout is the workaround this exists to remove.
+#[derive(Debug)]
+pub struct NoSuchTunnel(pub(crate) String);
+
+impl std::fmt::Display for NoSuchTunnel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NoSuchTunnel {}
+
 /// `portzero url <domain>` — print exactly the resolved URL on stdout.
 ///
 /// Nothing else is written to stdout so the output is safe to capture in a
 /// script (`BASE_URL=$(portzero url web.myapp.portzero.local)`). Errors go to
-/// stderr and the process exits non-zero.
+/// stderr; an unknown tunnel exits [`crate::exit::NO_SUCH_TUNNEL`] and any other
+/// failure exits 1.
 pub fn url(domain: &str) -> Result<()> {
     let config = DaemonConfig::load();
     url_with_config(&config, domain)
@@ -117,18 +140,25 @@ fn url_with_config(config: &DaemonConfig, domain: &str) -> Result<()> {
     }
 
     // Not found: give an actionable, stderr-only diagnostic.
-    if tunnels.is_empty() {
-        bail!(
+    let detail = if tunnels.is_empty() {
+        format!(
             "No tunnel named '{target}' is known to the daemon (no tunnels are currently \
-             discovered). Is the daemon running (`portzero status`) and is PZ_TUNNEL set on \
-             the process/container?"
-        );
-    }
-    let known: Vec<&str> = tunnels.iter().map(|t| t.domain.as_str()).collect();
-    bail!(
-        "No tunnel named '{target}' is known to the daemon. Discovered tunnels: {}.",
-        known.join(", ")
-    );
+             discovered). Is the daemon running (`portzero status`)? A process registers by \
+             having PZ_TUNNEL=<name>.portzero.local set in its environment while it listens \
+             on a TCP port — nothing else is required."
+        )
+    } else {
+        let known: Vec<&str> = tunnels.iter().map(|t| t.domain.as_str()).collect();
+        format!(
+            "No tunnel named '{target}' is known to the daemon. Discovered tunnels: {}.",
+            known.join(", ")
+        )
+    };
+    Err(NoSuchTunnel(format!(
+        "{detail} (exit code {})",
+        crate::exit::NO_SUCH_TUNNEL
+    ))
+    .into())
 }
 
 /// `portzero env [--github]` — export every discovered tunnel's URL.
@@ -352,6 +382,59 @@ mod tests {
         let config = temp_config("url-empty");
         let err = url_with_config(&config, "web.portzero.local").unwrap_err();
         assert!(err.to_string().contains("no tunnels are currently"));
+        // The empty case must also state the registration contract: "nothing is
+        // discovered" is exactly when the reader does not yet know how to
+        // register anything.
+        assert!(err.to_string().contains("PZ_TUNNEL"));
+        cleanup(&config);
+    }
+
+    #[test]
+    fn url_not_found_is_typed_so_scripts_can_branch_on_the_exit_code() {
+        let config = temp_config("url-typed");
+        let state = portzero_daemon::route_table::OverlayState {
+            overlay_active: true,
+            routes: vec![overlay_route("web.portzero.local", 8080)],
+        };
+        state.save(&config.overlay_path()).unwrap();
+
+        for target in ["missing.portzero.local", "anything.portzero.local"] {
+            let err = url_with_config(&config, target).unwrap_err();
+            assert!(
+                err.downcast_ref::<NoSuchTunnel>().is_some(),
+                "{target} should be a NoSuchTunnel, got: {err}"
+            );
+        }
+        // And with no state at all, so a stopped daemon is still "not
+        // registered" rather than an opaque failure.
+        let empty = temp_config("url-typed-empty");
+        assert!(url_with_config(&empty, "web.portzero.local")
+            .unwrap_err()
+            .downcast_ref::<NoSuchTunnel>()
+            .is_some());
+        cleanup(&empty);
+        cleanup(&config);
+    }
+
+    #[test]
+    fn discovered_tunnels_reports_the_serving_backend_for_a_contested_name() {
+        // Two live backends claim one name. The URL handed to a script must be
+        // the port the daemon actually routes to, not whichever entry happened
+        // to sort first.
+        let config = temp_config("contested");
+        let mut shadowed = overlay_route("api.portzero.local", 9999);
+        shadowed.pid = 900;
+        let mut serving = overlay_route("api.portzero.local", 8080);
+        serving.pid = 100;
+        let state = portzero_daemon::route_table::OverlayState {
+            overlay_active: true,
+            routes: vec![shadowed, serving],
+        };
+        state.save(&config.overlay_path()).unwrap();
+
+        let tunnels = discovered_tunnels(&config);
+        assert_eq!(tunnels.len(), 1);
+        assert_eq!(tunnels[0].url, "http://api.portzero.local:8080");
         cleanup(&config);
     }
 

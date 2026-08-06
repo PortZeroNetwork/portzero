@@ -65,10 +65,16 @@ for a public Cloud tunnel). ALWAYS bind port 0 and let the daemon discover \
 the real port — never hardcode a port. Set `PZ_HEALTH_PATH` to the service's \
 readiness path so the tunnel reports health.
 
+**WebSockets:** Local (`*.portzero.local`) tunnels proxy raw TCP, so \
+WebSockets — Vite HMR, live reload, socket.io — work over them. Cloud tunnels \
+forward HTTP requests and responses only and answer a WebSocket handshake \
+with 501; keep WebSocket traffic on a Local tunnel.
+
 **Wait for / consume a tunnel:**
 
 - `portzero wait <domain> [--healthy]` — block until the tunnel is up (and healthy)
-- `portzero url <domain>` — print the tunnel's URL
+- `portzero url <domain>` — print the tunnel's URL (exit 4 = no such tunnel, \
+so `set -e` scripts can branch on it without testing for empty output)
 - `portzero inspect` — human-readable overview of services, tunnels, and routes
 - In-sandbox curls must bypass any HTTP proxy: `curl --noproxy '*' …` or set `NO_PROXY`
 

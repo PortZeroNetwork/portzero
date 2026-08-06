@@ -18,6 +18,16 @@ fn proc_svc(name: &str, pid: u32, cwd: Option<&str>) -> DiscoveredNetworkService
     }
 }
 
+/// Like [`proc_svc`] but with a distinct listening address, so the result is a
+/// genuinely different live backend rather than the same one seen twice.
+fn proc_svc_on(name: &str, pid: u32, cwd: Option<&str>, port: u16) -> DiscoveredNetworkService {
+    DiscoveredNetworkService {
+        real_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+        service_port: port,
+        ..proc_svc(name, pid, cwd)
+    }
+}
+
 fn container_svc(name: &str, id: &str) -> DiscoveredNetworkService {
     DiscoveredNetworkService {
         name: name.to_string(),
@@ -178,13 +188,62 @@ fn test_two_containers_same_name_distinct_ids_is_duplicate() {
 }
 
 #[test]
+fn test_leaked_backends_in_one_directory_are_duplicates() {
+    // The expensive real-world case: repeated test runs leave backends alive in
+    // a single project directory, all claiming one name on different ports.
+    // Grouping claimants by cwd alone collapsed these to one context and
+    // reported nothing, so an arbitrary leftover answered requests and its
+    // errors looked like application bugs.
+    let svcs = vec![
+        proc_svc_on("api", 300, Some("/work/app"), 8080),
+        proc_svc_on("api", 100, Some("/work/app"), 8081),
+        proc_svc_on("api", 200, Some("/work/app"), 8082),
+    ];
+    let issues = detect_duplicate_names(&svcs);
+    assert_eq!(issues.len(), 1);
+    match &issues[0] {
+        Issue::DuplicateName { name, claimants } => {
+            assert_eq!(name, "api");
+            assert_eq!(claimants.len(), 3);
+            // Lowest pid serves; the rest are named as shadowed so the reader
+            // knows which process to look at and which to stop.
+            assert!(claimants[0].contains("pid 100"), "{claimants:?}");
+            assert!(claimants[0].contains("[serving]"), "{claimants:?}");
+            assert!(claimants[1..].iter().all(|c| c.contains("[shadowed]")));
+        }
+        other => panic!("unexpected issue: {:?}", other),
+    }
+}
+
+#[test]
+fn test_claimant_list_names_backend_addresses() {
+    // The pid alone is not enough to find the offender; the address it is
+    // serving on is what distinguishes leaked siblings from each other.
+    let svcs = vec![
+        proc_svc_on("api", 100, Some("/work/app"), 8080),
+        proc_svc_on("api", 200, Some("/work/app"), 8081),
+    ];
+    match &detect_duplicate_names(&svcs)[0] {
+        Issue::DuplicateName { claimants, .. } => {
+            assert!(claimants[0].contains("127.0.0.1:8080"), "{claimants:?}");
+            assert!(claimants[1].contains("127.0.0.1:8081"), "{claimants:?}");
+        }
+        other => panic!("unexpected issue: {:?}", other),
+    }
+}
+
+#[test]
 fn test_issue_summary_and_fix_hint() {
     let issue = Issue::DuplicateName {
         name: "db".to_string(),
-        claimants: vec!["pid 1 (~/a)".to_string(), "pid 2 (~/b)".to_string()],
+        claimants: vec![
+            "pid 1 (~/a) on 127.0.0.1:1 [serving]".to_string(),
+            "pid 2 (~/b) on 127.0.0.1:2 [shadowed]".to_string(),
+        ],
     };
     assert!(issue.summary().contains("db"));
-    assert!(issue.summary().contains("2 contexts"));
+    assert!(issue.summary().contains("2 live backends"));
+    assert!(issue.fix_hint().contains("[serving]"));
     assert!(issue.fix_hint().contains("{branch}"));
     assert!(issue.fix_hint().contains("db-"));
 }
