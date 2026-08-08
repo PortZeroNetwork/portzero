@@ -59,6 +59,13 @@ CA_SUBJECT_CN='PortZero Local CA'
 LOCAL_NAME=vmtestlocal
 LOCAL_DOMAIN="$LOCAL_NAME.portzero.local"
 LOCAL_BODY="portzero-local-overlay-ok"
+# A second service on the same daemon, bound to `::1` ALONE. Such a service is
+# discovered correctly (right domain, right port, right PID) and used to be
+# proxied to an empty 127.0.0.1 — the tunnel connected and returned zero bytes.
+# See docs/developers/backend-address-selection.md.
+LOCAL_NAME6=vmtestlocal6
+LOCAL_DOMAIN6="$LOCAL_NAME6.portzero.local"
+LOCAL_BODY6="portzero-local-overlay-ipv6-ok"
 
 # --- cloud-tunnel test fixtures ---
 STAGING_DOMAIN=devenvtools.top
@@ -66,6 +73,7 @@ STAGING_SECRETS="${STAGING_SECRETS:-/media/psf/MBP-Sidecar/loumtech/vm-toolchain
 STAGING_BODY="portzero-staging-tunnel-ok"
 
 PORT=18080
+PORT6=18081
 LIB="$(cd "$(dirname "$0")" && pwd)/lib/http-echo.pl"
 
 fails=0
@@ -215,6 +223,24 @@ run_tunnel_test() { # <phase-prefix> <tunnel-env-value> <domain-to-check> <expec
     fi
     echo "PHASE=$prefix-service ok=true port=$PORT tunnel=$domain"
 
+    # A second tagged service bound to ::1 ONLY, served by the SAME daemon —
+    # which also proves discovery handles a mixed-family set in one scan. When
+    # the guest cannot serve it at all (IPv6 disabled, perl without
+    # IO::Socket::IP) the leg SKIPs; a service reachable on [::1] directly but
+    # not through its tunnel is a hard failure.
+    local svc6_pid=""
+    sudo_ env PZ_TUNNEL="$LOCAL_DOMAIN6" perl "$LIB" "$LOCAL_BODY6" "$PORT6" '::1' >"$work/svc6.out" 2>&1 &
+    svc6_pid=$!
+    local up6=0
+    for _ in $(seq 1 20); do curl -sf --max-time 2 "http://[::1]:$PORT6/" >/dev/null 2>&1 && { up6=1; break; }; sleep 0.5; done
+    if [ "$up6" = 1 ]; then
+        echo "PHASE=$prefix-service-ipv6 ok=true port=$PORT6 tunnel=$LOCAL_DOMAIN6"
+    else
+        echo "PHASE=$prefix-service-ipv6 ok=SKIP reason=\"no IPv6 loopback service on this guest\""
+        kill -9 "$svc6_pid" >/dev/null 2>&1
+        svc6_pid=""
+    fi
+
     sudo_ env HOME="$HOME" "$BIN" start --no-browser >"$work/start.out" 2>&1
     echo "PHASE=$prefix-daemon-launched ok=true"
 
@@ -230,6 +256,24 @@ run_tunnel_test() { # <phase-prefix> <tunnel-env-value> <domain-to-check> <expec
         echo "PHASE=$prefix-tunnel ok=false domain=$domain"
         [ -f "$HOME/.portzero/daemon/daemon.log" ] && tail -8 "$HOME/.portzero/daemon/daemon.log"
         fails=$((fails + 1))
+    fi
+
+    # The overlay is up by now, so the IPv6 leg needs far less patience.
+    if [ -n "$svc6_pid" ]; then
+        local ok6=0
+        for _ in $(seq 1 30); do
+            local b6; b6="$(curl -sf --max-time 5 "http://$LOCAL_DOMAIN6/" 2>/dev/null)"
+            [ "$b6" = "$LOCAL_BODY6" ] && { ok6=1; break; }
+            sleep 2
+        done
+        if [ "$ok6" = 1 ]; then
+            echo "PHASE=$prefix-tunnel-ipv6 ok=true domain=$LOCAL_DOMAIN6"
+        else
+            echo "PHASE=$prefix-tunnel-ipv6 ok=false domain=$LOCAL_DOMAIN6 (IPv6-only backend not reachable through its tunnel)"
+            [ -f "$HOME/.portzero/daemon/daemon.log" ] && tail -8 "$HOME/.portzero/daemon/daemon.log"
+            fails=$((fails + 1))
+        fi
+        kill -9 "$svc6_pid" >/dev/null 2>&1
     fi
 
     # Bounded stop, then force-kill — never let cleanup wedge the rest of the run.

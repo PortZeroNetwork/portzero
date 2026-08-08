@@ -7,16 +7,29 @@
 #
 # The caller sets $env:PZ_TUNNEL before launching this so the daemon discovers
 # this process as the tagged service.
+#
+# -BindAddress defaults to IPv4 loopback and exists so a test can stand up a
+# service on `::1` ALONE — the shape that used to be discovered correctly and
+# then proxied to an empty 127.0.0.1 (see docs/developers/backend-address-
+# selection.md).
 param(
     [string]$Body = "ok",
-    [int]$Port = 0            # 0 = ephemeral
+    [int]$Port = 0,                     # 0 = ephemeral
+    [string]$BindAddress = "127.0.0.1"
 )
 $ErrorActionPreference = 'Stop'
 
-$listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $Port)
+$ip = [System.Net.IPAddress]::Parse($BindAddress)
+$listener = [System.Net.Sockets.TcpListener]::new($ip, $Port)
+# A bind to :: must NOT also accept IPv4, so an IPv6-only listener is exactly
+# that. (.NET leaves DualMode off by default; set it explicitly so the intent
+# survives a future default change.)
+if ($ip.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6) {
+    $listener.Server.DualMode = $false
+}
 $listener.Start()
 $bound = $listener.LocalEndpoint.Port
-Write-Output "PORT=$bound"
+Write-Output "PORT=$bound BIND=$BindAddress"
 [Console]::Out.Flush()
 
 $payload = [System.Text.Encoding]::ASCII.GetBytes($Body)

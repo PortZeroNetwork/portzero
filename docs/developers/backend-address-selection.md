@@ -60,6 +60,23 @@ have.
   port) → `forwarder::forward_request`. An unparseable persisted `host` falls
   back to `127.0.0.1`, the historical value.
 
+## How it is tested
+
+Three layers, because each one can only see so much:
+
+- **Unit** — the platform parsers against real `/proc`, `lsof`, `netstat`, and
+  Docker output lines, plus the `dial_addr` mapping table.
+- **In-crate integration** — real bytes to a live `[::1]` listener: a cloud
+  forward (`forwarder::tests`) and an overlay byte-proxy across the smoltcp
+  stack (`tests/overlay_unprivileged.rs`).
+- **VM system test** — `PHASE=local-tunnel-ipv6` in the combined flavor
+  (`vmtest/scripts/combined-{linux,macos,windows}`) serves a second tagged
+  service bound to `::1` alone, alongside the normal IPv4 one, and requires it
+  to answer through its real tunnel on a real OS. This is the only layer that
+  exercises the actual platform enumeration path — the unit tests feed those
+  parsers synthetic lines; here the kernel writes them. A guest with no IPv6
+  loopback SKIPs the leg rather than failing it.
+
 ## What this is not
 
 This is IPv6 on the *backend* side only. The overlay itself is IPv4: VIPs are

@@ -213,13 +213,22 @@ function Fetch-PriorMsi {
 # via a same-host http:// poll the way the overlay intercepts .portzero.local
 # (it needs route-registration + approval first, and only serves over the real
 # public HTTPS edge) — see Invoke-CloudTunnelTest below for that flow.
+#
+# A second tagged service, bound to `::1` ALONE, is served by the SAME daemon —
+# which also proves discovery handles a mixed-family set in one scan. Such a
+# service is discovered correctly (right domain, right port, right PID) and used
+# to be proxied to an empty 127.0.0.1, so the tunnel connected and returned zero
+# bytes. See docs/developers/backend-address-selection.md.
 function Invoke-TunnelTest {
     param([string] $Prefix, [string] $TunnelEnvValue, [string] $Domain, [string] $Body)
     $lib = Join-Path $PSScriptRoot 'lib\http-echo.ps1'
     $work = Join-Path $env:TEMP ("pz-$Prefix-" + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force -Path $work | Out-Null
     $svcOut = Join-Path $work 'svc.out'
+    $domain6 = 'vmtestlocal6.portzero.local'
+    $body6 = 'portzero-local-overlay-ipv6-ok'
     $svc = $null
+    $svc6 = $null
     try {
         $port = 18080
         $env:PZ_TUNNEL = $TunnelEnvValue
@@ -234,6 +243,26 @@ function Invoke-TunnelTest {
         }
         if (-not $up) { Phase "$Prefix-service" $false; return }
         "PHASE=$Prefix-service ok=true port=$port tunnel=$Domain"
+
+        # IPv6-only sibling. When the guest cannot serve it at all (IPv6
+        # disabled) the leg SKIPs; a service reachable on [::1] directly but not
+        # through its tunnel is a hard failure.
+        $port6 = 18081
+        $env:PZ_TUNNEL = $domain6
+        $svc6 = Start-Process powershell -PassThru -WindowStyle Hidden `
+            -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$lib,'-Body',$body6,'-Port',"$port6",'-BindAddress','::1') `
+            -RedirectStandardOutput (Join-Path $work 'svc6.out') -RedirectStandardError (Join-Path $work 'svc6.err')
+        Remove-Item Env:\PZ_TUNNEL -ErrorAction SilentlyContinue
+        $up6 = $false
+        for ($i = 0; $i -lt 20; $i++) {
+            try { $null = Invoke-WebRequest "http://[::1]:$port6/" -TimeoutSec 2 -UseBasicParsing; $up6 = $true; break } catch {}
+            Start-Sleep -Milliseconds 500
+        }
+        Phase-Skip "$Prefix-service-ipv6" $up6 "this guest cannot serve on [::1] at all (IPv6 disabled); the IPv6 tunnel leg cannot be tested here"
+        if (-not $up6) {
+            if ($svc6) { Stop-Process -Id $svc6.Id -Force -ErrorAction SilentlyContinue }
+            $svc6 = $null
+        }
 
         Start-Process -FilePath $InstalledExe -ArgumentList 'start','--no-browser' -WindowStyle Hidden `
             -RedirectStandardOutput (Join-Path $work 'start.log') -RedirectStandardError (Join-Path $work 'start.err')
@@ -254,12 +283,34 @@ function Invoke-TunnelTest {
             if (Test-Path $dlog) { "PHASE=diag daemon-log-tail:"; Get-Content $dlog -Tail 8 }
             Phase "$Prefix-tunnel" $false
         }
+
+        # The overlay is up by now, so the IPv6 leg needs far less patience.
+        if ($svc6) {
+            $ok6 = $false
+            for ($i = 1; $i -le 30; $i++) {
+                try {
+                    $resp6 = Invoke-WebRequest -Uri "http://$domain6/" -TimeoutSec 5 -UseBasicParsing
+                    if ($resp6.Content.Trim() -eq $body6) { $ok6 = $true; break }
+                } catch { }
+                Start-Sleep -Seconds 2
+            }
+            if ($ok6) {
+                "PHASE=$Prefix-tunnel-ipv6 ok=true domain=$domain6"
+            } else {
+                $dlog = Join-Path $env:USERPROFILE '.portzero\daemon\daemon.log'
+                if (Test-Path $dlog) { "PHASE=diag daemon-log-tail:"; Get-Content $dlog -Tail 8 }
+                ">> $domain6 is served on [::1] but did not answer through its tunnel:"
+                ">>   the daemon discovered it and dialed the wrong address family."
+                Phase "$Prefix-tunnel-ipv6" $false
+            }
+        }
     } finally {
         $j = Start-Job { & $using:InstalledExe stop 2>&1 | Out-Null }
         if (-not (Wait-Job $j -Timeout 10)) { Stop-Job $j -ErrorAction SilentlyContinue; "WARN=stop-wedged-forced-kill" }
         Remove-Job $j -Force -ErrorAction SilentlyContinue
         Get-Process portzero -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
         if ($svc) { Stop-Process -Id $svc.Id -Force -ErrorAction SilentlyContinue }
+        if ($svc6) { Stop-Process -Id $svc6.Id -Force -ErrorAction SilentlyContinue }
         Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
     }
 }
