@@ -2,7 +2,8 @@
 //! System categories. Each returns `Some(Diagnostic)` when it finds a problem
 //! and `None` when the check passes.
 //!
-//! The TLS / local-CA trust checks live in `checks_tls_trust.rs`.
+//! The TLS / local-CA trust checks live in `checks_tls_trust.rs`, and the
+//! tray-presence check in `checks_tray.rs`.
 
 use std::path::Path;
 // Still needed on Linux by check_binary_exists' " (deleted)" strip below, even
@@ -63,6 +64,14 @@ pub(super) fn check_binary_exists() -> Option<Diagnostic> {
 /// even an exact-name match would still count a passing `portzero status`
 /// invocation. Requiring `--foreground` in the arguments avoids both.
 fn is_daemon_process(p: &sysinfo::Process) -> bool {
+    // On Linux sysinfo enumerates threads alongside processes, and a thread
+    // reports its parent's name *and* command line — so every worker thread of
+    // one daemon would match the name/`--foreground` test below and be counted
+    // as another instance, reporting "multiple daemons" for a single healthy
+    // one. `thread_kind()` is `None` only for real processes.
+    if p.thread_kind().is_some() {
+        return false;
+    }
     let name = p.name().to_string_lossy();
     let stem = name.strip_suffix(".exe").unwrap_or(&name);
     if stem != "portzero" {

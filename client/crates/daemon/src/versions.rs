@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::discovery_loop::{read_daemon_pid, DaemonConfig};
-use crate::management::pid_lookup::pid_is_alive;
+use crate::management::pid_lookup::process_is_alive_named;
 
 /// The version this binary was built from — the workspace version.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -67,6 +67,22 @@ impl Component {
             Component::Tray => "Tray",
             Component::App => "Desktop app",
             Component::Cli => "CLI",
+        }
+    }
+
+    /// File name (no extension) of the binary this component runs as, used to
+    /// confirm that a recorded PID still belongs to *this* component rather
+    /// than to whatever process later inherited the number.
+    ///
+    /// The daemon has no binary of its own — it is a `portzero start
+    /// --foreground` process — so it shares the CLI's name. On macOS the
+    /// bundled components keep these names inside `Contents/MacOS/`, and on
+    /// Windows the `.exe` suffix is stripped before comparison.
+    pub fn binary_stem(self) -> &'static str {
+        match self {
+            Component::Daemon | Component::Cli => "portzero",
+            Component::Tray => "portzero-tray",
+            Component::App => "portzero-app",
         }
     }
 
@@ -191,12 +207,31 @@ pub fn withdraw(config: &DaemonConfig, component: Component) {
     let _ = std::fs::remove_file(record_path(&components_dir(config), component));
 }
 
-/// Read a component's record, or `None` if it is absent, unreadable, or owned by
-/// a PID that is no longer alive (a component that crashed without cleaning up).
+/// Read a component's record, or `None` if it is absent, unreadable, or no
+/// longer backed by a running instance of that component.
+///
+/// A crashed component leaves its record behind, so the PID it names is only
+/// evidence of a live component while that PID is still running the
+/// component's own binary — see
+/// [`process_is_alive_named`](crate::management::pid_lookup::process_is_alive_named).
+/// Checking mere liveness let a recycled PID keep a dead component "running"
+/// indefinitely, which is how a machine with no tray icon at all still reported
+/// a running tray in `portzero version` and a clean `portzero doctor`.
 pub fn read_record(dir: &Path, component: Component) -> Option<ComponentRecord> {
+    read_record_as(dir, component, component.binary_stem())
+}
+
+/// [`read_record`] against an explicit owner binary name, so tests can name the
+/// test binary as the component they are simulating instead of needing a real
+/// `portzero-tray` process.
+fn read_record_as(
+    dir: &Path,
+    component: Component,
+    expected_stem: &str,
+) -> Option<ComponentRecord> {
     let raw = std::fs::read_to_string(record_path(dir, component)).ok()?;
     let record: ComponentRecord = serde_json::from_str(&raw).ok()?;
-    if record.component != component || !pid_is_alive(record.pid) {
+    if record.component != component || !process_is_alive_named(record.pid, expected_stem) {
         return None;
     }
     Some(record)
@@ -534,14 +569,36 @@ mod tests {
         );
     }
 
+    /// The test binary stands in for a running component: announce a record
+    /// owned by our own live PID and read it back naming our own binary.
+    fn own_stem() -> String {
+        crate::management::pid_lookup::running_binary_stem(std::process::id())
+            .expect("the test binary must be identifiable for these tests to mean anything")
+    }
+
     #[test]
     fn record_round_trips_through_the_components_dir() {
         let dir = tempfile::tempdir().unwrap();
         announce_in(dir.path(), Component::Tray, "1.2.3", std::process::id()).unwrap();
 
-        let record = read_record(dir.path(), Component::Tray).expect("record should be readable");
+        let record = read_record_as(dir.path(), Component::Tray, &own_stem())
+            .expect("record should be readable");
         assert_eq!(record.version, "1.2.3");
         assert_eq!(record.component, Component::Tray);
+    }
+
+    /// The regression behind a machine that showed "Tray … running" in
+    /// `portzero version` with no tray icon anywhere: the tray had died and an
+    /// unrelated process had since been assigned its PID, so a liveness-only
+    /// check kept the stale record alive forever.
+    #[test]
+    fn a_record_whose_pid_was_recycled_by_another_binary_reads_as_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        // Our own PID is live but is not running `portzero-tray` — exactly what
+        // a recycled PID looks like.
+        announce_in(dir.path(), Component::Tray, "1.2.3", std::process::id()).unwrap();
+
+        assert!(read_record(dir.path(), Component::Tray).is_none());
     }
 
     #[test]

@@ -11,6 +11,10 @@ use tokio::time::Duration;
 mod agent_mcp;
 mod checks;
 mod checks_tls_trust;
+mod checks_tray;
+pub use checks_tray::{
+    tray_missing_detail, tray_presence, tray_start_command, TrayPresence, TRAY_MISSING_FIX,
+};
 mod probes;
 
 const PORTZERO_LOCAL_DASHBOARD_IP: &str = "10.254.0.2";
@@ -101,6 +105,7 @@ pub async fn run_diagnostics(state_dir: &std::path::Path) -> DiagnosticsReport {
         run!(checks::check_wintun_present());
         run!(checks::check_dashboard_hosts_pin());
         run!(checks::check_autostart_installed());
+        run!(checks_tray::check_tray_running());
         run!(checks::check_conflicting_vpn_software());
         run!(checks::check_auth_token(&state_dir));
         run!(checks::check_cloud_plan(&state_dir));

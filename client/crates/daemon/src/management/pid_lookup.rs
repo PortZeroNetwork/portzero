@@ -198,7 +198,15 @@ pub fn pid_is_alive(pid: u32) -> bool {
     }
     #[cfg(target_os = "linux")]
     {
-        std::path::Path::new(&format!("/proc/{}", pid)).exists()
+        // `/proc/<n>` is stat-able for a *thread* id as well as a process id —
+        // thread directories are hidden from `readdir` but resolve fine when
+        // named directly. A bare `.exists()` therefore reports a dead PID as
+        // alive as soon as any unrelated process spawns a thread that happens
+        // to be assigned that id, which is common on a busy desktop: a real
+        // install got wedged when `/usr/bin/kaccess` took the tray's old PID
+        // for its `QXcbEventQueue` thread. Requiring `Tgid == pid` keeps only
+        // thread-group leaders, i.e. actual processes.
+        linux_tgid(pid) == Some(pid)
     }
     #[cfg(target_os = "macos")]
     {
@@ -230,5 +238,198 @@ pub fn pid_is_alive(pid: u32) -> bool {
     {
         let _ = pid;
         true
+    }
+}
+
+/// Thread-group id of `/proc/<pid>`, or `None` if there is no such task.
+///
+/// Equals `pid` for a process and the owning process's id for a thread, which
+/// is how [`pid_is_alive`] tells the two apart.
+#[cfg(target_os = "linux")]
+fn linux_tgid(pid: u32) -> Option<u32> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("Tgid:"))
+        .and_then(|v| v.trim().parse().ok())
+}
+
+/// Return `true` if `pid` is a live process **and** the binary it is running is
+/// named `expected_stem` (no directory, no `.exe` suffix — e.g.
+/// `"portzero-tray"`).
+///
+/// Callers that read a PID out of a file are really asking "is the component
+/// that wrote this still running", and a bare PID cannot answer that: PIDs are
+/// recycled, so a record left behind by a crashed component eventually names
+/// some unrelated process and reads as alive forever. That is not a rare race —
+/// it wedged a real install, where a dead tray's PID was reused and the
+/// single-instance guard then refused to start a tray at every login while
+/// `portzero doctor` and `portzero version` both reported the tray as running.
+///
+/// Verifying the binary name closes that off: an unrelated process fails the
+/// match, and the one case that still passes — a *different* process running
+/// the same binary — is genuinely the answer the caller wants.
+///
+/// Falls back to a plain liveness probe on platforms where the running binary
+/// cannot be identified, which is no worse than the PID-only check it replaces.
+pub fn process_is_alive_named(pid: u32, expected_stem: &str) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    match running_binary_stem(pid) {
+        Some(stem) => stem == expected_stem,
+        // On Linux a truncated `comm` is still authoritative for names that fit
+        // (all of ours do); elsewhere an unreadable name means "can't tell", so
+        // fall back rather than declaring a live component dead and starting a
+        // duplicate.
+        None => pid_is_alive(pid),
+    }
+}
+
+/// File name of the executable `pid` is running, minus any `.exe` suffix, or
+/// `None` if the process is gone or its binary cannot be identified.
+pub fn running_binary_stem(pid: u32) -> Option<String> {
+    let path = running_binary_path(pid)?;
+    let name = std::path::Path::new(&path).file_name()?.to_str()?;
+    Some(name.strip_suffix(".exe").unwrap_or(name).to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn running_binary_path(pid: u32) -> Option<String> {
+    if linux_tgid(pid) != Some(pid) {
+        return None;
+    }
+    match std::fs::read_link(format!("/proc/{pid}/exe")) {
+        Ok(exe) => {
+            let exe = exe.to_str()?;
+            // An in-place upgrade unlinks the old binary while the old process
+            // keeps running it, and the kernel then appends " (deleted)" to the
+            // symlink target. Strip it, or a still-running pre-upgrade
+            // component reads as "some other binary" and we start a duplicate.
+            Some(exe.strip_suffix(" (deleted)").unwrap_or(exe).to_string())
+        }
+        // `/proc/<pid>/exe` needs ptrace-level access, so it is unreadable for
+        // another user's process (and under a restrictive `ptrace_scope`).
+        // `comm` is world-readable; it is truncated to 15 bytes, which every
+        // PortZero binary name fits inside.
+        Err(_) => std::fs::read_to_string(format!("/proc/{pid}/comm"))
+            .ok()
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty()),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn running_binary_path(pid: u32) -> Option<String> {
+    // `comm` is the executable path, which for our bundled components is
+    // `…/PortZero Tray.app/Contents/MacOS/portzero-tray`; the caller takes the
+    // file name. `ps` prints nothing at all for a PID that is not running.
+    let out = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!path.is_empty()).then_some(path)
+}
+
+#[cfg(target_os = "windows")]
+fn running_binary_path(pid: u32) -> Option<String> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    // Extended-length path limit, so a component installed under a deep path
+    // still reports its name instead of failing the buffer.
+    const PATH_BUF: usize = 32_768;
+    // `PROCESS_NAME_FORMAT` value 0 = `PROCESS_NAME_WIN32` (a Win32 path,
+    // rather than the `\Device\…` native form).
+    const PROCESS_NAME_WIN32: u32 = 0;
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+        let mut buf = vec![0u16; PATH_BUF];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut len);
+        CloseHandle(handle);
+        if ok == 0 {
+            return None;
+        }
+        Some(String::from_utf16_lossy(&buf[..len as usize]))
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn running_binary_path(_pid: u32) -> Option<String> {
+    None
+}
+
+#[cfg(test)]
+mod liveness_tests {
+    use super::*;
+
+    #[test]
+    fn pid_zero_is_never_alive() {
+        assert!(!pid_is_alive(0));
+        assert!(!process_is_alive_named(0, "portzero-tray"));
+    }
+
+    #[test]
+    fn our_own_process_is_alive() {
+        assert!(pid_is_alive(std::process::id()));
+    }
+
+    /// The test binary is not named `portzero-tray`, so a name-checked probe
+    /// against our own live PID must still say "not the tray" — this is exactly
+    /// the PID-reuse case that used to read as alive.
+    #[test]
+    fn a_live_process_running_a_different_binary_does_not_match() {
+        assert!(!process_is_alive_named(std::process::id(), "portzero-tray"));
+    }
+
+    #[test]
+    fn a_live_process_matches_its_own_binary_name() {
+        let stem = running_binary_stem(std::process::id());
+        // Only meaningful where we can identify the running binary at all.
+        if let Some(stem) = stem {
+            assert!(process_is_alive_named(std::process::id(), &stem));
+        }
+    }
+
+    /// `/proc/<tid>` resolves for threads too, which is how a dead component's
+    /// recycled PID used to look alive. Spawn a thread and check that its id is
+    /// not mistaken for a process.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_thread_id_is_not_a_live_process() {
+        use std::sync::mpsc;
+
+        let (tx, rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            // SAFETY: plain syscall with no arguments and no memory effects.
+            let tid = unsafe { libc::syscall(libc::SYS_gettid) } as u32;
+            tx.send(tid).unwrap();
+            // Hold the thread open until the assertions have run.
+            let _ = done_rx.recv();
+        });
+
+        let tid = rx.recv().unwrap();
+        assert_ne!(tid, std::process::id(), "expected a distinct thread id");
+        assert!(
+            std::path::Path::new(&format!("/proc/{tid}")).exists(),
+            "precondition: /proc/<tid> resolves, which is the trap being guarded"
+        );
+        assert!(!pid_is_alive(tid), "a thread id must not read as a process");
+        assert!(!process_is_alive_named(tid, "portzero-tray"));
+
+        let _ = done_tx.send(());
+        handle.join().unwrap();
     }
 }
