@@ -335,6 +335,22 @@ Active Connections
 }
 
 #[test]
+fn parse_windows_netstat_stdout_by_pid_keeps_an_ipv6_only_listener() {
+    // netstat prints `TCP` in the Proto column for both families and brackets
+    // the IPv6 address. The rows only exist when netstat is invoked WITHOUT
+    // `-p tcp` (that flag means IPv4 TCP only on Windows, and hid IPv6-only
+    // services from discovery entirely) — see NETSTAT_ARGS.
+    let stdout = "\
+  Proto  Local Address          Foreign Address        State           PID
+  TCP    [::1]:18081            [::]:0                 LISTENING       777
+";
+    let by_pid = parse_windows_netstat_stdout_by_pid(stdout);
+    let ports = by_pid.get(&777).cloned().unwrap_or_default();
+    assert_eq!(ports, vec![ListeningPort::v6_loopback(18081)]);
+    assert_eq!(ports[0].dial_addr(), IpAddr::V6(Ipv6Addr::LOCALHOST));
+}
+
+#[test]
 fn parse_windows_netstat_line_filters_by_requested_pid() {
     let line = "  TCP    0.0.0.0:8080           0.0.0.0:0              LISTENING       111";
     assert!(parse_windows_netstat_line(line, 111).is_some());
