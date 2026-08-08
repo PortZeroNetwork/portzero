@@ -292,11 +292,25 @@ Get-NetTCPConnection -State Listen -OwningProcess {pid} |
     }
 }
 
+/// Arguments for the netstat listener dump.
+///
+/// **No `-p tcp`.** On Windows that flag names a protocol out of
+/// `tcp | udp | tcpv6 | udpv6`, and `tcp` means IPv4 TCP *only* — an IPv6
+/// listener needs `-p tcpv6`. Passing `-p tcp` therefore made every IPv6-only
+/// service invisible to discovery: it was never enumerated, so it got no
+/// tunnel and no diagnostic (caught by the `local-tunnel-ipv6` VM system test,
+/// which is where a missing CLI flag can be caught — no parser test can see
+/// it). Without `-p`, netstat prints both families, with `TCP` in the Proto
+/// column for each; `parse_windows_netstat_line_any_pid` filters to listening
+/// TCP rows anyway.
+#[cfg(target_os = "windows")]
+const NETSTAT_ARGS: &[&str] = &["-ano"];
+
 #[cfg(target_os = "windows")]
 fn discover_ports_windows_netstat(pid: u32) -> Vec<ListeningPort> {
     use std::process::Command;
 
-    let output = match Command::new("netstat").args(["-ano", "-p", "tcp"]).output() {
+    let output = match Command::new("netstat").args(NETSTAT_ARGS).output() {
         Ok(o) if o.status.success() => o,
         _ => return Vec::new(),
     };
@@ -310,7 +324,7 @@ pub(in crate::discovery) fn discover_all_ports_windows_by_pid(
 ) -> std::collections::HashMap<u32, Vec<ListeningPort>> {
     use std::process::Command;
 
-    let output = match Command::new("netstat").args(["-ano", "-p", "tcp"]).output() {
+    let output = match Command::new("netstat").args(NETSTAT_ARGS).output() {
         Ok(o) if o.status.success() => o,
         _ => return std::collections::HashMap::new(),
     };
