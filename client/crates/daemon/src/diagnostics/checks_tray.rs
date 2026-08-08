@@ -4,6 +4,9 @@
 //! alongside `checks_tls_trust.rs`. One question: is the system-tray companion
 //! actually there when the user asked for it to be?
 
+// Only the Linux and macOS autostart probes look at paths; Windows infers
+// autostart from the installed binary instead (see `tray_autostart_installed`).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::path::Path;
 
 use super::{Diagnostic, Fix, FixKind, Severity};
