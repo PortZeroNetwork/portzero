@@ -255,10 +255,13 @@ async fn cloud_connector_full_flow_against_mock_edge() {
         ping_ts,
     ));
 
-    // 3. The domain router the reader uses to resolve host -> local port. In
+    // 3. The domain router the reader uses to resolve host -> local address. In
     //    production the discovery loop populates this alongside register_route.
     let router = DomainRouter::new();
-    router.add_route(domain.clone(), backend_port);
+    router.add_route(
+        domain.clone(),
+        std::net::SocketAddr::from(([127, 0, 0, 1], backend_port)),
+    );
 
     // 4. Drive a real CloudConnector: connect (sends Hello) then register.
     let auth_token = "tok_mock_abc123".to_string();

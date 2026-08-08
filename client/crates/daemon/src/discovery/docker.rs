@@ -258,6 +258,7 @@ fn container_service_from_inspect_line(
         domain_template: raw_domain.to_string(),
         substitutions,
         port,
+        host: docker_dial_host(ports_json, port),
         extra_ports,
         health_path,
         pid: container_pid,
@@ -357,6 +358,51 @@ pub(super) fn parse_docker_ports(ports_json: &str, selection: &HttpPortSelection
     }
 }
 
+/// The address to dial for a published `host_port`, read from a container's
+/// `NetworkSettings.Ports` JSON.
+///
+/// Docker records which host address each port was published on: `0.0.0.0`
+/// (IPv4), `::` (IPv6), or a specific address. A container published on IPv6
+/// only has to be reached on `::1`; publishing on both families keeps the IPv4
+/// loopback every published container has always used.
+pub(super) fn docker_dial_host(ports_json: &str, host_port: u16) -> IpAddr {
+    let fallback = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+    let Ok(ports) = serde_json::from_str::<serde_json::Value>(ports_json) else {
+        return fallback;
+    };
+    let Some(obj) = ports.as_object() else {
+        return fallback;
+    };
+
+    let mut ipv6_candidate = None;
+    for bindings in obj.values() {
+        for binding in bindings.as_array().into_iter().flatten() {
+            let matches_port = binding
+                .get("HostPort")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<u16>().ok())
+                .is_some_and(|p| p == host_port);
+            if !matches_port {
+                continue;
+            }
+
+            let host_ip = binding.get("HostIp").and_then(|v| v.as_str()).unwrap_or("");
+            // An empty HostIp means "all IPv4 interfaces", the same as 0.0.0.0.
+            let dial = ListeningPort::new(
+                crate::discovery::process::parse_listen_address(host_ip, false),
+                host_port,
+            )
+            .dial_addr();
+            if dial.is_ipv4() {
+                return dial;
+            }
+            ipv6_candidate.get_or_insert(dial);
+        }
+    }
+
+    ipv6_candidate.unwrap_or(fallback)
+}
+
 /// Try to recover a host-side git project directory from a container's mounts
 /// and labels. This enables correct `{branch}` / `{worktree}` resolution for
 /// `PZ_TUNNEL` when using plain `docker run -v ...` or `docker compose`.
@@ -427,7 +473,7 @@ pub(super) async fn scan_network_containers() -> Vec<DiscoveredNetworkService> {
 }
 
 fn scan_network_containers_impl() -> anyhow::Result<Vec<DiscoveredNetworkService>> {
-    use std::net::{IpAddr, SocketAddr};
+    use std::net::SocketAddr;
 
     if !command_on_path("docker") {
         return Ok(Vec::new());
@@ -530,7 +576,7 @@ fn scan_network_containers_impl() -> anyhow::Result<Vec<DiscoveredNetworkService
             continue;
         }
 
-        let real_addr = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), host_port);
+        let real_addr = SocketAddr::new(docker_dial_host(ports_json, host_port), host_port);
         // An explicit canonical port wins; otherwise prefer the container port,
         // falling back to the host port.
         let svc_port = canonical_port.unwrap_or(if service_port > 0 {
@@ -756,6 +802,66 @@ mod tests {
         assert_eq!(parse_docker_port_mapping("not json"), None);
         assert_eq!(parse_docker_port_mapping(""), None);
         assert_eq!(parse_docker_port_mapping("[1,2,3]"), None);
+    }
+
+    // -----------------------------------------------------------------
+    // docker_dial_host
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn docker_dial_host_uses_ipv4_loopback_for_an_ipv4_publish() {
+        let json = r#"{"5432/tcp":[{"HostIp":"0.0.0.0","HostPort":"54320"}]}"#;
+        assert_eq!(
+            docker_dial_host(json, 54320),
+            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        );
+    }
+
+    #[test]
+    fn docker_dial_host_uses_ipv6_loopback_for_an_ipv6_only_publish() {
+        let json = r#"{"5432/tcp":[{"HostIp":"::","HostPort":"54320"}]}"#;
+        assert_eq!(
+            docker_dial_host(json, 54320),
+            IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+        );
+    }
+
+    #[test]
+    fn docker_dial_host_prefers_ipv4_when_published_on_both_families() {
+        // The usual dual-stack publish. IPv4 is what every published container
+        // has always been reached on, so nothing changes for them.
+        let json = r#"{"5432/tcp":[{"HostIp":"::","HostPort":"54320"},{"HostIp":"0.0.0.0","HostPort":"54320"}]}"#;
+        assert_eq!(
+            docker_dial_host(json, 54320),
+            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        );
+    }
+
+    #[test]
+    fn docker_dial_host_reads_a_specific_published_host_address() {
+        let json = r#"{"5432/tcp":[{"HostIp":"127.0.0.5","HostPort":"54320"}]}"#;
+        assert_eq!(
+            docker_dial_host(json, 54320),
+            IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 5))
+        );
+    }
+
+    #[test]
+    fn docker_dial_host_falls_back_to_ipv4_loopback_when_it_cannot_tell() {
+        // Missing HostIp, an unknown port, and unparseable JSON all keep the
+        // address the daemon has always used rather than dropping the route.
+        assert_eq!(
+            docker_dial_host(r#"{"5432/tcp":[{"HostPort":"54320"}]}"#, 54320),
+            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        );
+        assert_eq!(
+            docker_dial_host(r#"{"5432/tcp":[{"HostIp":"::","HostPort":"54320"}]}"#, 9999),
+            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        );
+        assert_eq!(
+            docker_dial_host("not json", 54320),
+            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        );
     }
 
     // -----------------------------------------------------------------

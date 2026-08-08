@@ -158,13 +158,7 @@ sshd     not-a-pid root   3u  IPv4 0xdeadbeef        0t0  TCP *:22 (LISTEN)
         assert!(ports_a.iter().all(|p| p.port == 8080));
         let (pid_b, ports_b) = &grouped[1];
         assert_eq!(*pid_b, 1201);
-        assert_eq!(
-            ports_b,
-            &vec![ListeningPort {
-                port: 5173,
-                bind: BindAddr::Public
-            }]
-        );
+        assert_eq!(ports_b, &vec![ListeningPort::v4_any(5173)]);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

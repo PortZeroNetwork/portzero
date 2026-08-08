@@ -7,6 +7,7 @@ Audience: [target-audience.md](target-audience.md).
 - [Development](development.md) — tests, `just`, lefthook, Ticketry
 - [Desktop app](desktop-app.md) — `portzero-app` (Tauri v2), dev workflow, build/embedding
 - [Tunnel protocol support](tunnel-protocol-support.md) — what Local vs Cloud tunnels can carry (WebSockets, body limits, timeouts)
+- [Which address the daemon dials](backend-address-selection.md) — how a discovered port becomes a backend address, and why the family matters (`::1` vs `127.0.0.1`)
 - [Complexity budgets](complexity-budgets.md)
 - [Software delivery lifecycle](sdlc.md) — staging, stable tags, workflows
 - [Release version numbers](release-version-numbers.md)

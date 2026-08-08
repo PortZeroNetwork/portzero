@@ -15,6 +15,10 @@
 //!   `net::stack::tests::vip_connect_proxies_to_backend`) using the
 //!   `#[doc(hidden)]` test-support helpers exposed from `net::stack`.
 //!
+//! * [`unprivileged_vip_byte_proxy_to_an_ipv6_only_backend`] is the same byte
+//!   path with the backend bound to `[::1]` alone — the case that used to be
+//!   discovered correctly and then proxied to an empty `127.0.0.1`.
+//!
 //! * [`unprivileged_contested_name_serves_exactly_one_backend`] covers the case
 //!   where several live backends claim one `PZ_TUNNEL` name — leaked processes
 //!   from repeated test runs, the shape that made a stale backend answer
@@ -41,7 +45,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
 
-use common::{dns_query_a, spawn_echo_backend, spawn_identifying_backend, TEST_TIMEOUT};
+use common::{
+    dns_query_a, spawn_echo_backend, spawn_echo_backend_on, spawn_identifying_backend, TEST_TIMEOUT,
+};
 
 /// Unprivileged, in-process e2e: wires together the public overlay surface and
 /// asserts name -> VIP resolution plus a reachable real backend. No root, no
@@ -208,6 +214,92 @@ async fn unprivileged_vip_byte_proxy() {
     })
     .await
     .expect("unprivileged vip byte-proxy timed out");
+}
+
+/// Same real-bytes path as [`unprivileged_vip_byte_proxy`], but the backend is
+/// bound to `[::1]` alone.
+///
+/// This is the shape of the silent failure the address-family fix exists for: a
+/// dev server that resolved "localhost" to `::1` (Node >= 17 on a dual-stack
+/// host) was discovered correctly and then proxied to a hardcoded `127.0.0.1`,
+/// where nothing was listening — the tunnel connected and returned zero bytes.
+/// The overlay is IPv4 on the client side either way; only the backend dial
+/// changes.
+#[tokio::test]
+async fn unprivileged_vip_byte_proxy_to_an_ipv6_only_backend() {
+    use portzero_daemon::net::stack::{
+        client_iface, new_tcp_socket, test_tcp, MockDevice, OverlayHttpsPolicy, TestInstant,
+        TestIpAddress, TestIpv4Address, TestSocketSet, VirtualStack,
+    };
+
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let Some(backend_addr) = spawn_echo_backend_on("[::1]:0").await else {
+            eprintln!("skipping: no IPv6 loopback on this host");
+            return;
+        };
+        assert!(backend_addr.is_ipv6(), "backend must be IPv6-only");
+
+        let mut table = ServiceTable::new();
+        let svc = table.register("v6-db".to_string(), backend_addr, 5432, 0);
+        let vip_v4 = TestIpv4Address::from_bytes(&svc.vip.0);
+
+        let (stack_dev, mut client_dev) = MockDevice::pair();
+        let stack =
+            VirtualStack::spawn_with_device(stack_dev, table, None, OverlayHttpsPolicy::default());
+
+        let client_ip = TestIpv4Address::new(10, 254, 9, 10);
+        let mut client_iface = client_iface(&mut client_dev, client_ip);
+        let mut client_sockets = TestSocketSet::new(Vec::new());
+        let client_handle = client_sockets.add(new_tcp_socket());
+        {
+            let sock = client_sockets.get_mut::<test_tcp::Socket>(client_handle);
+            let cx = client_iface.context();
+            sock.connect(
+                cx,
+                (TestIpAddress::Ipv4(vip_v4), 5432u16),
+                (client_ip, 49001u16),
+            )
+            .unwrap();
+        }
+
+        let payload = b"hello over ipv6";
+        let mut sent = false;
+        let mut received = Vec::new();
+
+        for _ in 0..2000 {
+            client_iface.poll(TestInstant::now(), &mut client_dev, &mut client_sockets);
+
+            let sock = client_sockets.get_mut::<test_tcp::Socket>(client_handle);
+            if sock.may_send() && sock.can_send() && !sent {
+                sock.send_slice(payload).unwrap();
+                sent = true;
+            }
+            if sock.can_recv() {
+                let mut buf = vec![0u8; 4096];
+                if let Ok(n) = sock.recv_slice(&mut buf) {
+                    received.extend_from_slice(&buf[..n]);
+                }
+            }
+            if received.len() >= payload.len() {
+                break;
+            }
+
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+
+        assert!(
+            sent,
+            "client never reached a sendable state (handshake failed)"
+        );
+        assert_eq!(
+            received, payload,
+            "byte-proxy did not reach the IPv6-only backend"
+        );
+
+        stack.shutdown().await.unwrap();
+    })
+    .await
+    .expect("unprivileged ipv6 vip byte-proxy timed out");
 }
 
 /// Unprivileged, in-process system test for a tunnel name claimed by more than

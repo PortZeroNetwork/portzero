@@ -247,7 +247,7 @@ pub async fn run_discovery_loop(config: &DaemonConfig) -> Result<()> {
 
     // Seed the domain router from any pre-existing routes
     for (domain, route) in &route_table.routes {
-        domain_router.add_route(domain.clone(), route.port);
+        domain_router.add_route(domain.clone(), routes::route_backend_addr(route));
     }
 
     // The cloud connection is brand-new; register any routes that were
@@ -828,6 +828,10 @@ async fn reconcile_routes(
                 domain_template: route.domain_template.clone(),
                 substitutions: route.substitutions.clone(),
                 port: route.port,
+                host: route
+                    .host
+                    .parse()
+                    .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
                 extra_ports: route.extra_ports.clone(),
                 health_path: route.health_path.clone(),
                 pid: route.pid,

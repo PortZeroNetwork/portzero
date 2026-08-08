@@ -152,7 +152,78 @@ fn test_update_domain_router() {
     };
 
     update_domain_router(&router, &changes);
-    assert_eq!(router.resolve("api.test.portzero.cloud"), Some(8080));
+    assert_eq!(
+        router.resolve("api.test.portzero.cloud"),
+        Some(std::net::SocketAddr::from(([127, 0, 0, 1], 8080)))
+    );
+}
+
+#[test]
+fn update_domain_router_carries_an_ipv6_backend_address() {
+    use crate::discovery::ServiceSource;
+    use crate::route_table::Route;
+
+    // A route for a process listening on [::1] must resolve to [::1], not to
+    // the IPv4 loopback the daemon used to hardcode — dialing 127.0.0.1 for
+    // an IPv6-only listener connects to nothing.
+    let router = DomainRouter::new();
+    let changes = RouteChanges {
+        added: vec![Route {
+            domain: "vite.test.portzero.cloud".to_string(),
+            domain_template: "vite.test.portzero.cloud".to_string(),
+            substitutions: Default::default(),
+            host: "::1".to_string(),
+            port: 5173,
+            extra_ports: vec![],
+            health_path: None,
+            source: ServiceSource::Process { cwd: None },
+            pid: 1,
+            discovered_at: chrono::Utc::now(),
+        }],
+        removed: vec![],
+        changed: vec![],
+    };
+
+    update_domain_router(&router, &changes);
+    assert_eq!(
+        router.resolve("vite.test.portzero.cloud"),
+        Some(std::net::SocketAddr::new(
+            std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+            5173
+        ))
+    );
+}
+
+#[test]
+fn update_domain_router_falls_back_to_ipv4_loopback_for_an_unparseable_host() {
+    use crate::discovery::ServiceSource;
+    use crate::route_table::Route;
+
+    // `routes.json` is persisted text; a file written by an older daemon (or
+    // hand-edited) must not silently drop the route.
+    let router = DomainRouter::new();
+    let changes = RouteChanges {
+        added: vec![Route {
+            domain: "legacy.test.portzero.cloud".to_string(),
+            domain_template: "legacy.test.portzero.cloud".to_string(),
+            substitutions: Default::default(),
+            host: "not-an-address".to_string(),
+            port: 8080,
+            extra_ports: vec![],
+            health_path: None,
+            source: ServiceSource::Process { cwd: None },
+            pid: 1,
+            discovered_at: chrono::Utc::now(),
+        }],
+        removed: vec![],
+        changed: vec![],
+    };
+
+    update_domain_router(&router, &changes);
+    assert_eq!(
+        router.resolve("legacy.test.portzero.cloud"),
+        Some(std::net::SocketAddr::from(([127, 0, 0, 1], 8080)))
+    );
 }
 
 #[test]
@@ -491,6 +562,7 @@ fn reject_unauthorized_cloud_routes_flags_only_disallowed_apex() {
             domain_template: domain.into(),
             substitutions: Default::default(),
             port: 8080,
+            host: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
             extra_ports: vec![],
             health_path: None,
             pid,

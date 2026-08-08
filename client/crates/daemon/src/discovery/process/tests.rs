@@ -98,16 +98,7 @@ fn parse_extra_ports_trims_whitespace_around_entries() {
 
 #[test]
 fn select_http_port_explicit_prefers_requested_over_lowest() {
-    let ports = vec![
-        ListeningPort {
-            port: 3000,
-            bind: BindAddr::Public,
-        },
-        ListeningPort {
-            port: 8080,
-            bind: BindAddr::Public,
-        },
-    ];
+    let ports = vec![ListeningPort::v4_any(3000), ListeningPort::v4_any(8080)];
     assert_eq!(
         select_http_port(&ports, &HttpPortSelection::Explicit(8080)),
         SelectedPort::Found(8080)
@@ -117,14 +108,8 @@ fn select_http_port_explicit_prefers_requested_over_lowest() {
 #[test]
 fn select_http_port_choose_highest_falls_back_to_loopback_when_no_public() {
     let ports = vec![
-        ListeningPort {
-            port: 4000,
-            bind: BindAddr::Loopback,
-        },
-        ListeningPort {
-            port: 9000,
-            bind: BindAddr::Loopback,
-        },
+        ListeningPort::v4_loopback(4000),
+        ListeningPort::v4_loopback(9000),
     ];
     assert_eq!(
         select_http_port(&ports, &HttpPortSelection::ChooseHighest),
@@ -143,7 +128,7 @@ fn parse_proc_net_tcp_line_ipv6_public_bind() {
     inodes.insert(555u64);
     let p = parse_proc_net_tcp_line(line, &inodes).expect("should parse");
     assert_eq!(p.port, 8080);
-    assert_eq!(p.bind, BindAddr::Public);
+    assert_eq!(p.addr, IpAddr::V6(Ipv6Addr::UNSPECIFIED));
 }
 
 #[cfg(target_os = "linux")]
@@ -165,7 +150,117 @@ fn parse_proc_net_tcp_line_malformed_lines_return_none() {
     assert!(parse_proc_net_tcp_line(no_colon, &inodes).is_none());
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn parse_proc_net_tcp_line_ipv6_loopback_bind() {
+    // The Vite-on-dual-stack case: Node >= 17 stopped reordering DNS results,
+    // so a server told to bind "localhost" lands on [::1] alone. `::1` in
+    // /proc is the last 32-bit word set, printed in host byte order.
+    let line = "0: 00000000000000000000000001000000:1435 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 555 1 0000000000000000 100 0 0 10 0";
+    let mut inodes = std::collections::HashSet::new();
+    inodes.insert(555u64);
+    let p = parse_proc_net_tcp_line(line, &inodes).expect("should parse");
+    assert_eq!(p.port, 5173);
+    assert_eq!(p.addr, IpAddr::V6(Ipv6Addr::LOCALHOST));
+    assert_eq!(p.dial_addr(), IpAddr::V6(Ipv6Addr::LOCALHOST));
+    assert!(!p.is_wildcard());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn parse_proc_net_tcp_line_specific_and_v4_mapped_addresses() {
+    let mut inodes = std::collections::HashSet::new();
+    inodes.insert(555u64);
+
+    // C0A80105 = 192.168.1.5 in host byte order — a specific interface, which
+    // the old all-zeros check mislabeled as loopback.
+    let lan = "0: 0501A8C0:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 555 1 0000000000000000 100 0 0 10 0";
+    let p = parse_proc_net_tcp_line(lan, &inodes).expect("should parse");
+    assert_eq!(p.addr, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5)));
+    assert!(!p.is_wildcard());
+    // Dialed as bound: there is nothing on loopback to reach.
+    assert_eq!(p.dial_addr(), IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5)));
+
+    // An IPv4-mapped address in tcp6 (::ffff:127.0.0.1) is an IPv4 listener.
+    let mapped = "0: 0000000000000000FFFF00000100007F:1F90 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 555 1 0000000000000000 100 0 0 10 0";
+    let p = parse_proc_net_tcp_line(mapped, &inodes).expect("should parse");
+    assert_eq!(p.addr, IpAddr::V4(Ipv4Addr::LOCALHOST));
+}
+
 // parse_lsof_stdout / parse_lsof_line
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn parse_lsof_line_reads_the_family_of_a_bare_star_from_the_type_column() {
+    // lsof prints a wildcard bind as `*` for both families, so only the TYPE
+    // column separates `0.0.0.0` from `::`.
+    let v6 = parse_lsof_line("node 100 u 5u IPv6 0x0 0t0 TCP *:5173 (LISTEN)")
+        .expect("IPv6 star parses");
+    assert_eq!(v6.addr, IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+    // A `::` socket accepts ::1 whether or not IPV6_V6ONLY is set.
+    assert_eq!(v6.dial_addr(), IpAddr::V6(Ipv6Addr::LOCALHOST));
+
+    let v4 = parse_lsof_line("node 100 u 5u IPv4 0x0 0t0 TCP *:5173 (LISTEN)")
+        .expect("IPv4 star parses");
+    assert_eq!(v4.addr, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    assert_eq!(v4.dial_addr(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn parse_lsof_line_drops_an_ipv6_zone_index() {
+    // A link-local address carries a zone (`%lo0`) that `IpAddr` cannot parse;
+    // it must not sink the whole listener.
+    let p = parse_lsof_line("node 100 u 5u IPv6 0x0 0t0 TCP [fe80::1%lo0]:8080 (LISTEN)")
+        .expect("zoned address parses");
+    assert_eq!(p.port, 8080);
+    assert_eq!(p.addr, IpAddr::V6("fe80::1".parse::<Ipv6Addr>().unwrap()));
+}
+
+#[test]
+fn dial_addr_maps_each_bind_form_to_something_reachable() {
+    // 0.0.0.0 and :: are not connectable addresses; loopback of the same
+    // family is. Everything else is already an address to dial.
+    assert_eq!(
+        ListeningPort::v4_any(80).dial_addr(),
+        IpAddr::V4(Ipv4Addr::LOCALHOST)
+    );
+    assert_eq!(
+        ListeningPort::v6_any(80).dial_addr(),
+        IpAddr::V6(Ipv6Addr::LOCALHOST)
+    );
+    assert_eq!(
+        ListeningPort::v4_loopback(80).dial_addr(),
+        IpAddr::V4(Ipv4Addr::LOCALHOST)
+    );
+    assert_eq!(
+        ListeningPort::v6_loopback(80).dial_addr(),
+        IpAddr::V6(Ipv6Addr::LOCALHOST)
+    );
+}
+
+#[test]
+fn dial_host_for_port_follows_the_family_of_the_selected_port() {
+    // A process with an IPv4 debugger port and an IPv6-only HTTP port: each
+    // port has to be dialed on its own family.
+    let ports = vec![
+        ListeningPort::v4_loopback(9229),
+        ListeningPort::v6_loopback(5173),
+    ];
+    assert_eq!(
+        dial_host_for_port(&ports, 5173),
+        IpAddr::V6(Ipv6Addr::LOCALHOST)
+    );
+    assert_eq!(
+        dial_host_for_port(&ports, 9229),
+        IpAddr::V4(Ipv4Addr::LOCALHOST)
+    );
+    // A port discovery never saw keeps the historical IPv4 loopback.
+    assert_eq!(
+        dial_host_for_port(&ports, 8080),
+        IpAddr::V4(Ipv4Addr::LOCALHOST)
+    );
+}
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
@@ -195,14 +290,8 @@ fn parse_windows_tcp_connection_stdout_mixed_valid_and_invalid_lines() {
     assert_eq!(
         ports,
         vec![
-            ListeningPort {
-                port: 8080,
-                bind: BindAddr::Public,
-            },
-            ListeningPort {
-                port: 5173,
-                bind: BindAddr::Loopback,
-            },
+            ListeningPort::v4_any(8080),
+            ListeningPort::v4_loopback(5173),
         ]
     );
 }
@@ -236,23 +325,11 @@ Active Connections
     assert_eq!(
         pid_111,
         vec![
-            ListeningPort {
-                port: 5173,
-                bind: BindAddr::Loopback
-            },
-            ListeningPort {
-                port: 8080,
-                bind: BindAddr::Public
-            },
+            ListeningPort::v4_loopback(5173),
+            ListeningPort::v4_any(8080),
         ]
     );
-    assert_eq!(
-        by_pid.get(&444),
-        Some(&vec![ListeningPort {
-            port: 3000,
-            bind: BindAddr::Public
-        }])
-    );
+    assert_eq!(by_pid.get(&444), Some(&vec![ListeningPort::v6_any(3000)]));
     assert!(!by_pid.contains_key(&222)); // ESTABLISHED, not LISTENING
     assert!(!by_pid.contains_key(&333)); // UDP, not TCP
 }
@@ -268,11 +345,11 @@ fn parse_windows_netstat_line_filters_by_requested_pid() {
 fn parse_windows_local_address_port_ipv6_bracket_form() {
     let p = parse_windows_local_address_port("[::1]:57889").expect("should parse");
     assert_eq!(p.port, 57889);
-    assert_eq!(p.bind, BindAddr::Loopback);
+    assert_eq!(p.addr, IpAddr::V6(Ipv6Addr::LOCALHOST));
 
     let p = parse_windows_local_address_port("[::]:8080").expect("should parse");
     assert_eq!(p.port, 8080);
-    assert_eq!(p.bind, BindAddr::Public);
+    assert_eq!(p.addr, IpAddr::V6(Ipv6Addr::UNSPECIFIED));
 }
 
 #[test]

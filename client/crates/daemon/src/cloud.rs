@@ -665,7 +665,7 @@ pub async fn handle_incoming(
                 store.record_http(&host, &method, &path, referer, x_pz_test);
             }
 
-            let local_port = domain_router.resolve(&host).ok_or_else(|| {
+            let local_addr = domain_router.resolve(&host).ok_or_else(|| {
                 anyhow::anyhow!(
                     "No local service for host '{}' — route may have been removed",
                     host
@@ -673,7 +673,7 @@ pub async fn handle_incoming(
             })?;
 
             let response = forwarder::forward_request(
-                request_id, &method, &path, &host, &headers, &body, local_port,
+                request_id, &method, &path, &host, &headers, &body, local_addr,
             )
             .await?;
 

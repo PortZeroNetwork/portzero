@@ -4,18 +4,31 @@
 use portzero_tunnel_client::domain_router::DomainRouter;
 
 use crate::cloud::CloudConnector;
-use crate::route_table::RouteChanges;
+use crate::route_table::{Route, RouteChanges};
+
+/// The address to forward this route's traffic to.
+///
+/// `Route::host` is persisted as text, so a `routes.json` written by an older
+/// daemon (or hand-edited) may not parse; IPv4 loopback is the historical
+/// value and the right fallback.
+pub(super) fn route_backend_addr(route: &Route) -> std::net::SocketAddr {
+    let host = route
+        .host
+        .parse()
+        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    std::net::SocketAddr::new(host, route.port)
+}
 
 /// Update the domain router with route changes.
 pub(super) fn update_domain_router(router: &DomainRouter, changes: &RouteChanges) {
     for route in &changes.added {
-        router.add_route(route.domain.clone(), route.port);
+        router.add_route(route.domain.clone(), route_backend_addr(route));
     }
     for route in &changes.removed {
         router.remove_route(&route.domain);
     }
     for route in &changes.changed {
-        router.add_route(route.domain.clone(), route.port);
+        router.add_route(route.domain.clone(), route_backend_addr(route));
     }
 }
 
