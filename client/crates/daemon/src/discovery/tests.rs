@@ -149,7 +149,11 @@ fn test_parse_lsof_stdout_skips_header() {
     );
 }
 
-#[cfg(target_os = "windows")]
+// The Windows parsers below are pure string functions compiled on every
+// platform (see platform.rs), so their tests are NOT gated to Windows: gating
+// them meant only the Windows CI runner could catch a wrong expectation, which
+// is exactly how two of them shipped broken. The tests that need a real
+// Windows process or socket stay gated further down.
 #[test]
 fn test_parse_windows_tcp_connection_lines() {
     assert_eq!(
@@ -158,7 +162,7 @@ fn test_parse_windows_tcp_connection_lines() {
     );
     assert_eq!(
         parse_windows_tcp_connection_line("::|3000"),
-        Some(ListeningPort::v4_any(3000))
+        Some(ListeningPort::v6_any(3000))
     );
     assert_eq!(
         parse_windows_tcp_connection_line("127.0.0.1|5173"),
@@ -168,7 +172,6 @@ fn test_parse_windows_tcp_connection_lines() {
     assert_eq!(parse_windows_tcp_connection_line("bad"), None);
 }
 
-#[cfg(target_os = "windows")]
 #[test]
 fn test_parse_windows_netstat_lines() {
     assert_eq!(
@@ -190,7 +193,7 @@ fn test_parse_windows_netstat_lines() {
             "  TCP    [::]:3000              [::]:0                 LISTENING       1234",
             1234,
         ),
-        Some(ListeningPort::v4_any(3000))
+        Some(ListeningPort::v6_any(3000))
     );
     assert_eq!(
         parse_windows_netstat_line(
@@ -208,7 +211,6 @@ fn test_parse_windows_netstat_lines() {
     );
 }
 
-#[cfg(target_os = "windows")]
 #[test]
 fn test_parse_windows_environment_block() {
     let mut words: Vec<u16> = "Path=C:\\Windows\0PZ_TUNNEL=api.portzero.local\0\0"
