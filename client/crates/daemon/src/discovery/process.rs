@@ -529,7 +529,7 @@ fn scan_network_processes_sync() -> Vec<NetProcessCandidate> {
 
 #[cfg(target_os = "macos")]
 fn scan_network_processes_sync_macos() -> Vec<NetProcessCandidate> {
-    use std::net::{IpAddr, SocketAddr};
+    use std::net::SocketAddr;
 
     let mut sys = System::new();
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
@@ -686,7 +686,7 @@ fn scan_macos_env_candidates_ps() -> Vec<(u32, String)> {
 
 #[cfg(target_os = "windows")]
 fn scan_network_processes_sync_windows() -> Vec<NetProcessCandidate> {
-    use std::net::{IpAddr, SocketAddr};
+    use std::net::SocketAddr;
 
     let mut sys = System::new();
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
