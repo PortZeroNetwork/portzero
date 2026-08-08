@@ -5,6 +5,7 @@
 //! collects the response to send back.
 
 use std::collections::HashSet;
+use std::net::SocketAddr;
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -28,8 +29,13 @@ static FORWARD_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
 
 /// Forward an HTTP request from the edge to a local service.
 ///
-/// Builds a request to `http://127.0.0.1:{local_port}{path}`, sets the
-/// forwarded headers, sends it, and returns a `ClientMessage::HttpResponse`.
+/// Builds a request to `http://{local_addr}{path}`, sets the forwarded
+/// headers, sends it, and returns a `ClientMessage::HttpResponse`.
+///
+/// `local_addr` carries the address family the service is actually listening
+/// on, so an IPv6-only process is dialed on `[::1]` rather than an empty
+/// `127.0.0.1`. `SocketAddr`'s `Display` already brackets IPv6, which is what
+/// a URL authority needs.
 ///
 /// On connection failure, returns a 502 Bad Gateway response rather than
 /// an error, so the tunnel can relay a meaningful status to the end user.
@@ -40,9 +46,9 @@ pub async fn forward_request(
     host: &str,
     headers: &[(String, String)],
     body: &[u8],
-    local_port: u16,
+    local_addr: SocketAddr,
 ) -> Result<ClientMessage> {
-    let url = format!("http://127.0.0.1:{}{}", local_port, path);
+    let url = format!("http://{}{}", local_addr, path);
     debug!(request_id, %method, %url, %host, "Forwarding request to local service");
 
     // The edge protocol carries whole requests and responses, so there is no
@@ -60,7 +66,7 @@ pub async fn forward_request(
                  Local tunnels do support WebSockets: a *.portzero.local name proxies raw \
                  TCP, so live reload, HMR, and any other WebSocket traffic work over it. \
                  Point the WebSocket at a Local tunnel, or reach the service directly on \
-                 127.0.0.1:{local_port} while keeping the Cloud tunnel for HTTP."
+                 {local_addr} while keeping the Cloud tunnel for HTTP."
             ),
         ));
     }
@@ -94,7 +100,7 @@ pub async fn forward_request(
             warn!(request_id, "Local service error: {e}");
             return Ok(bad_gateway(
                 request_id,
-                format!("could not reach local process on port {local_port}: {e}"),
+                format!("could not reach the local process at {local_addr}: {e}"),
             ));
         }
     };
@@ -238,6 +244,12 @@ fn bad_gateway(request_id: u64, detail: String) -> ClientMessage {
 mod tests {
     use super::*;
 
+    /// The IPv4-loopback address these tests forward to. Nothing listens on
+    /// these ports; the point is what the forwarder does when the dial fails.
+    fn local(port: u16) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], port))
+    }
+
     #[test]
     fn filters_hop_by_hop_untrusted_forwarding_and_connection_named_headers() {
         let headers = vec![("Connection".to_string(), "X-Remove".to_string())];
@@ -308,7 +320,7 @@ mod tests {
                 ("Connection".to_string(), "Upgrade".to_string()),
             ],
             &[],
-            19997,
+            local(19997),
         )
         .await
         .unwrap();
@@ -332,6 +344,84 @@ mod tests {
         }
     }
 
+    /// Answer exactly one request with a canned 200 and return the address to
+    /// forward to. `bind` decides the address family under test.
+    async fn one_shot_backend(bind: &str) -> Option<SocketAddr> {
+        let listener = tokio::net::TcpListener::bind(bind).await.ok()?;
+        let addr = listener.local_addr().ok()?;
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                let _ = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi")
+                    .await;
+                let _ = stream.flush().await;
+            }
+        });
+        Some(addr)
+    }
+
+    #[tokio::test]
+    async fn forwards_to_an_ipv6_only_backend() {
+        // The regression this exists for: a dev server bound to [::1] alone
+        // (Vite/Node >= 17 resolving "localhost" to ::1 first) used to get a
+        // hardcoded 127.0.0.1 dial and answer nothing at all.
+        let Some(addr) = one_shot_backend("[::1]:0").await else {
+            eprintln!("skipping: no IPv6 loopback on this host");
+            return;
+        };
+        assert!(addr.is_ipv6());
+
+        let result = forward_request(1, "GET", "/", "vite.test.portzero.cloud", &[], &[], addr)
+            .await
+            .unwrap();
+
+        match result {
+            ClientMessage::HttpResponse { status, body, .. } => {
+                assert_eq!(status, 200);
+                assert_eq!(&body[..], b"hi");
+            }
+            other => panic!("Expected HttpResponse, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn forwards_to_an_ipv4_backend() {
+        let addr = one_shot_backend("127.0.0.1:0")
+            .await
+            .expect("IPv4 loopback is always available");
+
+        let result = forward_request(2, "GET", "/", "api.test.portzero.cloud", &[], &[], addr)
+            .await
+            .unwrap();
+
+        match result {
+            ClientMessage::HttpResponse { status, .. } => assert_eq!(status, 200),
+            other => panic!("Expected HttpResponse, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn unreachable_ipv6_backend_names_the_bracketed_address() {
+        // The 502 has to say which address failed — "port 5173" would not
+        // distinguish the family, which is the whole diagnosis here.
+        let addr = SocketAddr::new(std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST), 19996);
+        let result = forward_request(3, "GET", "/", "vite.test.portzero.cloud", &[], &[], addr)
+            .await
+            .unwrap();
+
+        match result {
+            ClientMessage::HttpResponse { status, body, .. } => {
+                assert_eq!(status, 502);
+                let body = String::from_utf8_lossy(&body);
+                assert!(body.contains("[::1]:19996"), "{body}");
+            }
+            other => panic!("Expected HttpResponse, got {:?}", other),
+        }
+    }
+
     #[tokio::test]
     async fn test_forward_to_unreachable_port() {
         // Forwarding to a port with nothing listening should return 502
@@ -342,7 +432,7 @@ mod tests {
             "api.test.portzero.cloud",
             &[],
             &[],
-            19999, // unlikely to be in use
+            local(19999), // unlikely to be in use
         )
         .await
         .unwrap();
@@ -373,7 +463,7 @@ mod tests {
             "api.test.portzero.cloud",
             &[("Content-Type".to_string(), "application/json".to_string())],
             b"{}",
-            19998,
+            local(19998),
         )
         .await
         .unwrap();

@@ -25,6 +25,7 @@
 //!   environment block and uses `Get-NetTCPConnection` for port ownership)
 
 use std::collections::BTreeMap;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -163,6 +164,10 @@ pub struct DiscoveredService {
     pub substitutions: BTreeMap<String, String>,
     /// Selected HTTP port (0 if not determinable).
     pub port: u16,
+    /// Address to forward to for `port` — the loopback address of the family
+    /// the process is actually bound to, so an IPv6-only listener is reached
+    /// on `::1` rather than an empty `127.0.0.1`.
+    pub host: IpAddr,
     /// Additional port mappings from PZ_TUNNEL_PORTS.
     pub extra_ports: Vec<PortMapping>,
     /// Optional readiness path from PZ_HEALTH_PATH (e.g. "/health"), normalized
@@ -225,18 +230,67 @@ impl std::fmt::Display for ServiceSource {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum BindAddr {
-    /// Bound to all interfaces (0.0.0.0 / ::).
-    Public,
-    /// Bound to loopback only (127.x.x.x / ::1).
-    Loopback,
-}
-
+/// One TCP socket a process is listening on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ListeningPort {
     port: u16,
-    bind: BindAddr,
+    /// The address the socket is bound to, exactly as the OS reports it:
+    /// a wildcard (`0.0.0.0` / `::`), a loopback address (`127.0.0.1` / `::1`),
+    /// or a specific interface address.
+    ///
+    /// The address family matters as much as the address: a process on `::1`
+    /// is unreachable from `127.0.0.1` even though both are loopback, which is
+    /// why this is kept rather than collapsed into a public/loopback flag.
+    addr: IpAddr,
+}
+
+impl ListeningPort {
+    fn new(addr: IpAddr, port: u16) -> Self {
+        Self { port, addr }
+    }
+
+    /// True when the socket is bound to every interface (`0.0.0.0` / `::`).
+    ///
+    /// Port selection prefers these: a process that exposes one port publicly
+    /// and keeps others on loopback (a debugger, a metrics endpoint) is
+    /// telling us which one it means to serve.
+    fn is_wildcard(&self) -> bool {
+        self.addr.is_unspecified()
+    }
+
+    /// The address the daemon must dial to reach this listener.
+    ///
+    /// A wildcard bind is reachable on loopback *of its own family*:
+    /// `0.0.0.0` → `127.0.0.1`, and `::` → `::1` (a `::` socket accepts `::1`
+    /// whether or not `IPV6_V6ONLY` is set, so this is the safe choice for
+    /// either). Anything else is dialed exactly as it was bound — including
+    /// `::1`, which the daemon used to be unable to reach at all.
+    fn dial_addr(&self) -> IpAddr {
+        match self.addr {
+            IpAddr::V4(a) if a.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V6(a) if a.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+            other => other,
+        }
+    }
+}
+
+#[cfg(test)]
+impl ListeningPort {
+    fn v4_any(port: u16) -> Self {
+        Self::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port)
+    }
+
+    fn v4_loopback(port: u16) -> Self {
+        Self::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+    }
+
+    fn v6_any(port: u16) -> Self {
+        Self::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port)
+    }
+
+    fn v6_loopback(port: u16) -> Self {
+        Self::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port)
+    }
 }
 
 #[derive(Debug, Clone, Default)]

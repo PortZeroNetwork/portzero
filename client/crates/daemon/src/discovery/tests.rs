@@ -77,7 +77,7 @@ fn test_parse_lsof_line_ipv4_loopback() {
     )
     .expect("should parse a port");
     assert_eq!(p.port, 50706);
-    assert_eq!(p.bind, BindAddr::Loopback);
+    assert_eq!(p.addr, IpAddr::V4(Ipv4Addr::LOCALHOST));
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -86,12 +86,12 @@ fn test_parse_lsof_line_public_forms() {
     let star =
         parse_lsof_line("node 100 u 5u IPv4 0x0 0t0 TCP *:8080 (LISTEN)").expect("star parses");
     assert_eq!(star.port, 8080);
-    assert_eq!(star.bind, BindAddr::Public);
+    assert_eq!(star.addr, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
 
     let any = parse_lsof_line("node 100 u 5u IPv4 0x0 0t0 TCP 0.0.0.0:8080 (LISTEN)")
         .expect("0.0.0.0 parses");
     assert_eq!(any.port, 8080);
-    assert_eq!(any.bind, BindAddr::Public);
+    assert_eq!(any.addr, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -102,12 +102,16 @@ fn test_parse_lsof_line_ipv6() {
     )
     .expect("[::1] parses");
     assert_eq!(loopback.port, 57889);
-    assert_eq!(loopback.bind, BindAddr::Loopback);
+    // The address family is the whole point: dialing 127.0.0.1 for this
+    // listener reaches nothing.
+    assert_eq!(loopback.addr, IpAddr::V6(Ipv6Addr::LOCALHOST));
+    assert_eq!(loopback.dial_addr(), IpAddr::V6(Ipv6Addr::LOCALHOST));
 
     let public =
         parse_lsof_line("node 100 u 5u IPv6 0x0 0t0 TCP [::]:8080 (LISTEN)").expect("[::] parses");
     assert_eq!(public.port, 8080);
-    assert_eq!(public.bind, BindAddr::Public);
+    assert_eq!(public.addr, IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+    assert_eq!(public.dial_addr(), IpAddr::V6(Ipv6Addr::LOCALHOST));
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -136,18 +140,11 @@ fn test_parse_lsof_stdout_skips_header() {
     assert_eq!(
         ports,
         vec![
-            ListeningPort {
-                port: 50706,
-                bind: BindAddr::Loopback
-            },
-            ListeningPort {
-                port: 57889,
-                bind: BindAddr::Loopback
-            },
-            ListeningPort {
-                port: 11434,
-                bind: BindAddr::Loopback
-            },
+            ListeningPort::v4_loopback(50706),
+            // The `IPv6` TYPE column plus `[::1]` — a listener that only an
+            // IPv6 dial can reach.
+            ListeningPort::v6_loopback(57889),
+            ListeningPort::v4_loopback(11434),
         ]
     );
 }
@@ -157,24 +154,15 @@ fn test_parse_lsof_stdout_skips_header() {
 fn test_parse_windows_tcp_connection_lines() {
     assert_eq!(
         parse_windows_tcp_connection_line("0.0.0.0|8080"),
-        Some(ListeningPort {
-            port: 8080,
-            bind: BindAddr::Public,
-        })
+        Some(ListeningPort::v4_any(8080))
     );
     assert_eq!(
         parse_windows_tcp_connection_line("::|3000"),
-        Some(ListeningPort {
-            port: 3000,
-            bind: BindAddr::Public,
-        })
+        Some(ListeningPort::v4_any(3000))
     );
     assert_eq!(
         parse_windows_tcp_connection_line("127.0.0.1|5173"),
-        Some(ListeningPort {
-            port: 5173,
-            bind: BindAddr::Loopback,
-        })
+        Some(ListeningPort::v4_loopback(5173))
     );
     assert_eq!(parse_windows_tcp_connection_line("127.0.0.1|0"), None);
     assert_eq!(parse_windows_tcp_connection_line("bad"), None);
@@ -188,30 +176,21 @@ fn test_parse_windows_netstat_lines() {
             "  TCP    127.0.0.1:5173         0.0.0.0:0              LISTENING       1234",
             1234,
         ),
-        Some(ListeningPort {
-            port: 5173,
-            bind: BindAddr::Loopback,
-        })
+        Some(ListeningPort::v4_loopback(5173))
     );
     assert_eq!(
         parse_windows_netstat_line(
             "  TCP    0.0.0.0:8080           0.0.0.0:0              LISTENING       1234",
             1234,
         ),
-        Some(ListeningPort {
-            port: 8080,
-            bind: BindAddr::Public,
-        })
+        Some(ListeningPort::v4_any(8080))
     );
     assert_eq!(
         parse_windows_netstat_line(
             "  TCP    [::]:3000              [::]:0                 LISTENING       1234",
             1234,
         ),
-        Some(ListeningPort {
-            port: 3000,
-            bind: BindAddr::Public,
-        })
+        Some(ListeningPort::v4_any(3000))
     );
     assert_eq!(
         parse_windows_netstat_line(
@@ -353,14 +332,8 @@ fn test_parse_extra_ports_empty() {
 #[test]
 fn test_select_http_port_explicit_owned() {
     let ports = vec![
-        ListeningPort {
-            port: 3000,
-            bind: BindAddr::Public,
-        },
-        ListeningPort {
-            port: 8080,
-            bind: BindAddr::Loopback,
-        },
+        ListeningPort::v4_any(3000),
+        ListeningPort::v4_loopback(8080),
     ];
     assert_eq!(
         select_http_port(&ports, &HttpPortSelection::Explicit(3000)),
@@ -375,14 +348,8 @@ fn test_select_http_port_explicit_owned() {
 #[test]
 fn test_select_http_port_explicit_not_owned() {
     let ports = vec![
-        ListeningPort {
-            port: 3000,
-            bind: BindAddr::Public,
-        },
-        ListeningPort {
-            port: 8080,
-            bind: BindAddr::Loopback,
-        },
+        ListeningPort::v4_any(3000),
+        ListeningPort::v4_loopback(8080),
     ];
     assert_eq!(
         select_http_port(&ports, &HttpPortSelection::Explicit(9000)),
@@ -401,14 +368,8 @@ fn test_select_http_port_explicit_no_listening_ports() {
 #[test]
 fn test_select_http_port_prefers_public() {
     let ports = vec![
-        ListeningPort {
-            port: 9229,
-            bind: BindAddr::Loopback,
-        }, // debugger
-        ListeningPort {
-            port: 3000,
-            bind: BindAddr::Public,
-        },
+        ListeningPort::v4_loopback(9229), // debugger
+        ListeningPort::v4_any(3000),
     ];
     assert_eq!(
         select_http_port(&ports, &HttpPortSelection::ChooseLowest),
@@ -419,14 +380,8 @@ fn test_select_http_port_prefers_public() {
 #[test]
 fn test_select_http_port_falls_back_to_loopback() {
     let ports = vec![
-        ListeningPort {
-            port: 8080,
-            bind: BindAddr::Loopback,
-        },
-        ListeningPort {
-            port: 3000,
-            bind: BindAddr::Loopback,
-        },
+        ListeningPort::v4_loopback(8080),
+        ListeningPort::v4_loopback(3000),
     ];
     assert_eq!(
         select_http_port(&ports, &HttpPortSelection::ChooseLowest),
@@ -437,18 +392,9 @@ fn test_select_http_port_falls_back_to_loopback() {
 #[test]
 fn test_select_http_port_choose_highest_public() {
     let ports = vec![
-        ListeningPort {
-            port: 3000,
-            bind: BindAddr::Public,
-        },
-        ListeningPort {
-            port: 8080,
-            bind: BindAddr::Public,
-        },
-        ListeningPort {
-            port: 9229,
-            bind: BindAddr::Loopback,
-        },
+        ListeningPort::v4_any(3000),
+        ListeningPort::v4_any(8080),
+        ListeningPort::v4_loopback(9229),
     ];
     assert_eq!(
         select_http_port(&ports, &HttpPortSelection::ChooseHighest),
@@ -536,7 +482,7 @@ fn test_parse_proc_net_tcp_listen_line_public() {
     assert!(result.is_some());
     let p = result.unwrap();
     assert_eq!(p.port, 8080);
-    assert_eq!(p.bind, BindAddr::Public);
+    assert_eq!(p.addr, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
 }
 
 #[cfg(target_os = "linux")]
@@ -550,7 +496,7 @@ fn test_parse_proc_net_tcp_listen_line_loopback() {
     assert!(result.is_some());
     let p = result.unwrap();
     assert_eq!(p.port, 8080);
-    assert_eq!(p.bind, BindAddr::Loopback);
+    assert_eq!(p.addr, IpAddr::V4(Ipv4Addr::LOCALHOST));
 }
 
 #[cfg(target_os = "linux")]

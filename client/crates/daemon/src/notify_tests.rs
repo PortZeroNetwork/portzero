@@ -48,6 +48,7 @@ fn container_svc(name: &str, id: &str) -> DiscoveredNetworkService {
 fn cloud_proc_svc(domain: &str, pid: u32, cwd: Option<&str>) -> DiscoveredService {
     DiscoveredService {
         domain: domain.to_string(),
+        host: IpAddr::V4(Ipv4Addr::LOCALHOST),
         domain_template: domain.to_string(),
         substitutions: Default::default(),
         port: 8080,

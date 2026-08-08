@@ -203,6 +203,7 @@ pub(super) fn scan_processes(
                 domain_template: raw_domain.to_string(),
                 substitutions,
                 port,
+                host: dial_host_for_port(&listening, port),
                 extra_ports,
                 health_path,
                 pid: pid_u32,
@@ -370,6 +371,7 @@ pub(super) fn scan_processes_windows(
             domain_template: raw_domain.to_string(),
             substitutions,
             port,
+            host: dial_host_for_port(&listening, port),
             extra_ports,
             health_path,
             pid: pid_u32,
@@ -408,7 +410,7 @@ fn scan_network_processes_sync() -> Vec<NetProcessCandidate> {
 
     #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
     {
-        use std::net::{IpAddr, SocketAddr};
+        use std::net::SocketAddr;
 
         let mut sys = System::new();
         sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
@@ -485,15 +487,15 @@ fn scan_network_processes_sync() -> Vec<NetProcessCandidate> {
 
             let chosen = listening
                 .iter()
-                .find(|lp| lp.bind == BindAddr::Public)
+                .find(|lp| lp.is_wildcard())
                 .or_else(|| listening.first());
 
-            let port = match chosen {
-                Some(lp) => lp.port,
+            let (port, dial_host) = match chosen {
+                Some(lp) => (lp.port, lp.dial_addr()),
                 None => continue,
             };
 
-            let real_addr = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
+            let real_addr = SocketAddr::new(dial_host, port);
 
             let (port, needs_probe) = match canonical_port {
                 Some(explicit) => (explicit, false),
@@ -601,15 +603,15 @@ fn scan_network_processes_sync_macos() -> Vec<NetProcessCandidate> {
 
         let chosen = listening
             .iter()
-            .find(|lp| lp.bind == BindAddr::Public)
+            .find(|lp| lp.is_wildcard())
             .or_else(|| listening.first());
 
-        let port = match chosen {
-            Some(lp) => lp.port,
+        let (port, dial_host) = match chosen {
+            Some(lp) => (lp.port, lp.dial_addr()),
             None => continue,
         };
 
-        let real_addr = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
+        let real_addr = SocketAddr::new(dial_host, port);
 
         let (port, needs_probe) = match canonical_port {
             Some(explicit) => (explicit, false),
@@ -756,15 +758,15 @@ fn scan_network_processes_sync_windows() -> Vec<NetProcessCandidate> {
 
         let chosen = listening
             .iter()
-            .find(|lp| lp.bind == BindAddr::Public)
+            .find(|lp| lp.is_wildcard())
             .or_else(|| listening.first());
 
-        let port = match chosen {
-            Some(lp) => lp.port,
+        let (port, dial_host) = match chosen {
+            Some(lp) => (lp.port, lp.dial_addr()),
             None => continue,
         };
 
-        let real_addr = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
+        let real_addr = SocketAddr::new(dial_host, port);
 
         let (port, needs_probe) = match canonical_port {
             Some(explicit) => (explicit, false),

@@ -28,8 +28,18 @@ pub const TEST_TIMEOUT: Duration = Duration::from_secs(15);
 /// Spawn a tiny TCP echo server bound to an ephemeral port (the "port 0"
 /// backend a real service would expose). Returns its real address.
 pub async fn spawn_echo_backend() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    spawn_echo_backend_on("127.0.0.1:0")
+        .await
+        .expect("IPv4 loopback is always bindable")
+}
+
+/// [`spawn_echo_backend`] on an explicit bind address, for tests that care
+/// which address family the backend is listening on. Returns `None` when the
+/// host cannot bind it at all (e.g. IPv6 disabled), so the caller can skip
+/// rather than fail.
+pub async fn spawn_echo_backend_on(bind: &str) -> Option<SocketAddr> {
+    let listener = TcpListener::bind(bind).await.ok()?;
+    let addr = listener.local_addr().ok()?;
     tokio::spawn(async move {
         loop {
             let (mut sock, _) = match listener.accept().await {
@@ -52,7 +62,7 @@ pub async fn spawn_echo_backend() -> SocketAddr {
             });
         }
     });
-    addr
+    Some(addr)
 }
 
 /// Spawn a TCP backend that answers every connection with `identity` and

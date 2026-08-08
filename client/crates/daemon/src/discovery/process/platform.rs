@@ -113,13 +113,40 @@ pub(in crate::discovery) fn parse_proc_net_tcp_line(
     if port == 0 {
         return None;
     }
-    // All-zero address hex means bound to all interfaces (0.0.0.0 or ::)
-    let bind = if addr_hex.chars().all(|c| c == '0') {
-        BindAddr::Public
-    } else {
-        BindAddr::Loopback
-    };
-    Some(ListeningPort { port, bind })
+    Some(ListeningPort::new(parse_proc_net_hex_addr(addr_hex)?, port))
+}
+
+/// Decode the hex address field of a `/proc/<pid>/net/tcp[6]` line.
+///
+/// The kernel prints each 32-bit word in **host** byte order, so on the
+/// little-endian hosts portzero targets `0100007F` is `127.0.0.1` and the
+/// 32-char form `00000000000000000000000001000000` is `::1`. IPv4-mapped
+/// addresses (`::ffff:127.0.0.1`) are normalized to their IPv4 form so the
+/// dial address matches the family the peer actually needs.
+#[cfg(target_os = "linux")]
+fn parse_proc_net_hex_addr(addr_hex: &str) -> Option<std::net::IpAddr> {
+    fn word(hex: &str) -> Option<[u8; 4]> {
+        Some(u32::from_str_radix(hex, 16).ok()?.to_le_bytes())
+    }
+
+    match addr_hex.len() {
+        8 => Some(std::net::IpAddr::V4(std::net::Ipv4Addr::from(word(
+            addr_hex,
+        )?))),
+        32 => {
+            let mut octets = [0u8; 16];
+            for (idx, chunk) in addr_hex.as_bytes().chunks(8).enumerate() {
+                octets[idx * 4..idx * 4 + 4]
+                    .copy_from_slice(&word(std::str::from_utf8(chunk).ok()?)?);
+            }
+            let v6 = std::net::Ipv6Addr::from(octets);
+            Some(match v6.to_ipv4_mapped() {
+                Some(v4) => std::net::IpAddr::V4(v4),
+                None => std::net::IpAddr::V6(v6),
+            })
+        }
+        _ => None,
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -163,8 +190,16 @@ pub(in crate::discovery) fn parse_lsof_stdout(stdout: &str) -> Vec<ListeningPort
 /// rather than the address. We therefore scan every whitespace token and pick
 /// the address token = the one whose `rsplit_once(':')` yields a parseable
 /// `u16` port. This naturally skips `(LISTEN)`, `TCP`, `0t0`, and other columns.
+///
+/// `lsof` renders a wildcard bind as a bare `*` for both families, so the
+/// address alone cannot say whether `*:5173` is `0.0.0.0` or `::`. The TYPE
+/// column (`IPv4` / `IPv6`) does, and is read here for exactly that case.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(in crate::discovery) fn parse_lsof_line(line: &str) -> Option<ListeningPort> {
+    let is_v6 = line
+        .split_whitespace()
+        .any(|token| token.eq_ignore_ascii_case("IPv6"));
+
     for token in line.split_whitespace() {
         // token is like "*:8080", "127.0.0.1:50706", "[::]:8080", "[::1]:57889"
         let Some((addr, port_str)) = token.rsplit_once(':') else {
@@ -176,14 +211,52 @@ pub(in crate::discovery) fn parse_lsof_line(line: &str) -> Option<ListeningPort>
         if port == 0 {
             continue;
         }
-        let bind = if addr == "*" || addr == "0.0.0.0" || addr == "[::]" {
-            BindAddr::Public
-        } else {
-            BindAddr::Loopback
-        };
-        return Some(ListeningPort { port, bind });
+        return Some(ListeningPort::new(parse_listen_address(addr, is_v6), port));
     }
     None
+}
+
+/// Parse the address part of a listener address as printed by `lsof`, netstat,
+/// or `Get-NetTCPConnection`: `*`, `0.0.0.0`, `::`, `127.0.0.1`, `[::1]`, or a
+/// specific interface address, optionally carrying an IPv6 zone (`%lo0`).
+///
+/// `v6_hint` decides the family of a bare `*`. Anything that fails to parse
+/// falls back to the wildcard of the hinted family, which reproduces the old
+/// behavior of dialing loopback rather than dropping the listener entirely.
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos", target_os = "windows")),
+    allow(dead_code)
+)]
+pub(in crate::discovery) fn parse_listen_address(addr: &str, v6_hint: bool) -> std::net::IpAddr {
+    let wildcard = if v6_hint {
+        std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
+    } else {
+        std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+    };
+
+    let trimmed = addr.trim();
+    if trimmed.is_empty() || trimmed == "*" {
+        return wildcard;
+    }
+
+    let unbracketed = trimmed
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(trimmed);
+    // Drop an IPv6 zone index ("fe80::1%lo0"), which `IpAddr` will not parse.
+    let zoneless = unbracketed
+        .split_once('%')
+        .map(|(addr, _zone)| addr)
+        .unwrap_or(unbracketed);
+
+    match zoneless.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(v6)) => match v6.to_ipv4_mapped() {
+            Some(v4) => std::net::IpAddr::V4(v4),
+            None => std::net::IpAddr::V6(v6),
+        },
+        Ok(ip) => ip,
+        Err(_) => wildcard,
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -264,14 +337,9 @@ pub(in crate::discovery) fn parse_windows_tcp_connection_line(line: &str) -> Opt
         return None;
     }
 
-    let addr = addr.trim();
-    let bind = if addr == "0.0.0.0" || addr == "::" || addr == "*" {
-        BindAddr::Public
-    } else {
-        BindAddr::Loopback
-    };
-
-    Some(ListeningPort { port, bind })
+    // `Get-NetTCPConnection` prints the address unbracketed and never as `*`,
+    // so it is always self-describing — no family hint needed.
+    Some(ListeningPort::new(parse_listen_address(addr, false), port))
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -343,13 +411,8 @@ pub(in crate::discovery) fn parse_windows_local_address_port(local: &str) -> Opt
         return None;
     }
 
-    let bind = if addr == "0.0.0.0" || addr == "::" || addr == "*" {
-        BindAddr::Public
-    } else {
-        BindAddr::Loopback
-    };
-
-    Some(ListeningPort { port, bind })
+    // netstat brackets IPv6 addresses, so the family is unambiguous here too.
+    Some(ListeningPort::new(parse_listen_address(addr, false), port))
 }
 
 pub(in crate::discovery) fn scan_process_env(pid: u32, var_name: &str) -> Option<String> {

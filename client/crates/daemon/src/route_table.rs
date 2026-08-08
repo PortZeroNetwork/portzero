@@ -23,7 +23,8 @@ pub struct Route {
     /// Values available for template substitution when this route was found.
     #[serde(default)]
     pub substitutions: BTreeMap<String, String>,
-    /// Host to forward to (usually "127.0.0.1").
+    /// Address to forward to — the loopback address of the family the service
+    /// is bound to (`127.0.0.1`, or `::1` for an IPv6-only listener).
     pub host: String,
     /// Port to forward to.
     pub port: u16,
@@ -102,6 +103,7 @@ impl RouteTable {
         for (domain, svc) in &seen_domains {
             if let Some(existing) = self.routes.get(domain) {
                 if existing.port != svc.port
+                    || existing.host != svc.host.to_string()
                     || existing.pid != svc.pid
                     || existing.health_path != svc.health_path
                 {
@@ -109,7 +111,7 @@ impl RouteTable {
                         domain: domain.clone(),
                         domain_template: svc.domain_template.clone(),
                         substitutions: svc.substitutions.clone(),
-                        host: "127.0.0.1".to_string(),
+                        host: svc.host.to_string(),
                         port: svc.port,
                         extra_ports: svc.extra_ports.clone(),
                         health_path: svc.health_path.clone(),
@@ -117,10 +119,12 @@ impl RouteTable {
                         pid: svc.pid,
                         discovered_at: existing.discovered_at,
                     };
-                    // Only notify cloud/domain-router when the port changes.
-                    // PID-only changes (e.g. process restart via nodemon) update
-                    // routes.json for tracking but don't need re-registration.
-                    if existing.port != svc.port {
+                    // Only notify cloud/domain-router when the backend address
+                    // changes — a restart that rebinds on the other family
+                    // (127.0.0.1 → ::1) needs re-registration just as much as a
+                    // new port. PID-only changes (e.g. a nodemon restart on the
+                    // same address) update routes.json for tracking but don't.
+                    if existing.port != svc.port || existing.host != svc.host.to_string() {
                         changes.changed.push(route.clone());
                     }
                     self.routes.insert(domain.clone(), route);
@@ -130,7 +134,7 @@ impl RouteTable {
                     domain: domain.clone(),
                     domain_template: svc.domain_template.clone(),
                     substitutions: svc.substitutions.clone(),
-                    host: "127.0.0.1".to_string(),
+                    host: svc.host.to_string(),
                     port: svc.port,
                     extra_ports: svc.extra_ports.clone(),
                     health_path: svc.health_path.clone(),
@@ -277,6 +281,7 @@ mod tests {
             domain_template: domain.to_string(),
             substitutions: Default::default(),
             port,
+            host: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
             extra_ports: vec![],
             health_path: None,
             pid,
@@ -331,6 +336,23 @@ mod tests {
         assert!(changes.removed.is_empty());
         assert_eq!(changes.changed.len(), 1);
         assert_eq!(changes.changed[0].port, 9090);
+    }
+
+    #[test]
+    fn test_update_detects_changed_backend_address_family() {
+        // Same port, same pid, but the process restarted bound to [::1]. The
+        // route has to be re-registered: forwarding to 127.0.0.1:8080 would
+        // now reach nothing.
+        let mut table = RouteTable::new();
+        table.update(vec![make_service("api.example.com", 8080, 100)]);
+
+        let mut moved = make_service("api.example.com", 8080, 100);
+        moved.host = std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST);
+        let changes = table.update(vec![moved]);
+
+        assert_eq!(changes.changed.len(), 1);
+        assert_eq!(changes.changed[0].host, "::1");
+        assert_eq!(table.routes.get("api.example.com").unwrap().host, "::1");
     }
 
     #[test]

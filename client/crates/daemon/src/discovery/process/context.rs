@@ -304,10 +304,25 @@ pub(in crate::discovery) fn parse_extra_ports(val: &str) -> Vec<PortMapping> {
         .collect()
 }
 
+/// The address to dial for `port`, given everything the process is listening on.
+///
+/// Discovery selects a port first (that is what PZ_TUNNEL_HTTP_PORT talks
+/// about), so the family has to be recovered from the listener that owns it —
+/// otherwise a service on `[::1]` is tunneled to an empty `127.0.0.1`. Falls
+/// back to IPv4 loopback when the port is not in `ports`, which only happens
+/// for callers that supply a port from outside discovery.
+pub(in crate::discovery) fn dial_host_for_port(ports: &[ListeningPort], port: u16) -> IpAddr {
+    ports
+        .iter()
+        .find(|lp| lp.port == port)
+        .map(|lp| lp.dial_addr())
+        .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
+}
+
 /// Choose the HTTP port from the list of listening ports.
 ///
-/// Prefers ports bound to 0.0.0.0 over loopback-only. Falls back to loopback
-/// when no public-facing port is found.
+/// Prefers ports bound to a wildcard address (`0.0.0.0` / `::`) over
+/// loopback-only ones. Falls back to loopback when no wildcard port is found.
 ///
 /// For `Explicit`, the requested port must be in `ports` (owned by the
 /// process); otherwise returns `ExplicitNotOwned`.
@@ -326,7 +341,7 @@ pub(in crate::discovery) fn select_http_port(
         HttpPortSelection::ChooseLowest => {
             let port = ports
                 .iter()
-                .filter(|p| p.bind == BindAddr::Public)
+                .filter(|p| p.is_wildcard())
                 .map(|p| p.port)
                 .min()
                 .or_else(|| ports.iter().map(|p| p.port).min());
@@ -338,7 +353,7 @@ pub(in crate::discovery) fn select_http_port(
         HttpPortSelection::ChooseHighest => {
             let port = ports
                 .iter()
-                .filter(|p| p.bind == BindAddr::Public)
+                .filter(|p| p.is_wildcard())
                 .map(|p| p.port)
                 .max()
                 .or_else(|| ports.iter().map(|p| p.port).max());
