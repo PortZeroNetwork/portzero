@@ -131,6 +131,25 @@ Each script prints greppable `PHASE=<name> ok=<true|false|SKIP>` lines and a
 final `RESULT=PASS|FAIL`; a leftover artifact or a broken tunnel yields
 `ok=false` and fails the run.
 
+### The local-tunnel step serves two backends, on both address families
+
+`PHASE=local-tunnel` is an ordinary IPv4-loopback service.
+`PHASE=local-tunnel-ipv6` is a second tagged service on the same daemon bound
+to **`::1` alone** — the shape that was discovered correctly (right domain,
+right port, right PID) and then proxied to an empty `127.0.0.1`, so the tunnel
+connected and returned zero bytes. It is a real OS-level regression test: only
+a genuine listening socket on `[::1]` exercises the platform port-enumeration
+path (`/proc/net/tcp6`, `lsof`'s IPv4/IPv6 TYPE column, `Get-NetTCPConnection`)
+that the unit tests can only feed synthetic lines. Serving both at once also
+proves discovery handles a mixed-family set in one scan. See
+`docs/developers/backend-address-selection.md`.
+
+The client side is IPv4 either way (the overlay hands out A records), so this
+needs no IPv6 connectivity — only an IPv6 **loopback**. A guest that cannot
+serve on `[::1]` at all reports `PHASE=local-tunnel-service-ipv6 ok=SKIP`; a
+service that *is* reachable on `[::1]` directly but not through its tunnel is
+`ok=false` and fails the run.
+
 For anything other than the default script/checkpoint, use
 `just vm-test-script "<vm>" vmtest/scripts/<name>.ps1 [checkpoint] [args...]`.
 
