@@ -51,8 +51,19 @@ versions::announce(&config, versions::Component::Tray, versions::BUILD_VERSION);
 ```
 
 That writes `~/.portzero/components/<name>.json` with the version and the PID.
-Readers treat a record whose PID is no longer alive as absent, so a component
+Readers treat a record as absent unless that PID is still running *that
+component's own binary* (`pid_lookup::process_is_alive_named`), so a component
 that crashed never leaves a phantom version behind.
+
+Checking the binary name, not just liveness, is load-bearing. PIDs are recycled,
+so a record left by a crashed component eventually names an unrelated process
+and a liveness-only check reports it as running forever. On Linux that happens
+even sooner than PID exhaustion suggests: `/proc/<n>` resolves for *thread* ids
+as well as process ids, so any thread spawned with the old number is enough.
+A real install hit exactly this — a dead tray's PID was taken by a `kaccess`
+thread, after which the tray's single-instance guard refused to start a tray at
+every login while `portzero version` and `portzero doctor` both insisted the
+tray was running. See `task-95`.
 
 | Component | Where its version comes from |
 |-----------|------------------------------|

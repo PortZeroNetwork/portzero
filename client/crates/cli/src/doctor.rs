@@ -163,6 +163,9 @@ pub async fn run() -> Result<()> {
     // 10. Every running component built from the same release.
     checks.push(check_component_versions());
 
+    // 11. The system-tray companion is there if the user asked for it.
+    checks.push(check_tray());
+
     print_report(&checks);
 
     if checks.iter().any(|c| c.status == Status::Fail) {
@@ -195,6 +198,32 @@ fn check_component_versions() -> Check {
                 .unwrap_or("restart the PortZero daemon, tray, and app")
         ),
     )
+}
+
+/// Is there actually a tray icon?
+///
+/// "The tray is running" is the one claim a user can check with their own eyes,
+/// so it is the one worth getting right. This looks for the process itself
+/// rather than trusting `~/.portzero/tray.pid` or the component record — a
+/// stale record naming a recycled PID is exactly the failure that let a machine
+/// with no tray icon pass every check while reporting the tray as running.
+fn check_tray() -> Check {
+    use portzero_daemon::diagnostics::{
+        tray_missing_detail, tray_presence, tray_start_command, TrayPresence, TRAY_MISSING_FIX,
+    };
+
+    match tray_presence() {
+        TrayPresence::Running(pid) => Check::pass("tray", format!("running as PID {pid}")),
+        TrayPresence::NotConfigured => Check::pass(
+            "tray",
+            "not set to start at login — the tray is optional and nothing depends on it",
+        ),
+        TrayPresence::Missing => Check::warn(
+            "tray",
+            tray_missing_detail(),
+            format!("{TRAY_MISSING_FIX}: {}", tray_start_command()),
+        ),
+    }
 }
 
 /// Is the daemon process running? Report its PID and (best-effort) uptime.

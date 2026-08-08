@@ -37,6 +37,19 @@ pub mod welcome;
 /// falls through to the platform-specific event loop.
 pub fn run() -> anyhow::Result<()> {
     if let Err(existing_pid) = singleton::acquire() {
+        // Also on stderr, not just the log: someone who ran `portzero-tray`
+        // from a terminal because no icon appeared needs to be told what
+        // happened and how to check. A bare exit 0 reads as "it worked", which
+        // is the least useful thing this can say.
+        eprintln!(
+            "portzero-tray is already running as PID {existing_pid}, so this instance exited \
+             rather than register a second tray icon.\n\
+             If you cannot see a PortZero icon in your system tray:\n\
+             - Confirm that process is really a tray: `portzero doctor`\n\
+             - Your desktop may not show tray icons by default (some GNOME setups need the \
+               AppIndicator extension).\n\
+             - To force a fresh tray: `kill {existing_pid}` and start portzero-tray again."
+        );
         tracing::info!(
             "portzero-tray (PID {existing_pid}) is already running; not starting a duplicate tray icon"
         );
@@ -50,5 +63,6 @@ pub fn run() -> anyhow::Result<()> {
     versions::announce(&config, versions::Component::Tray, versions::BUILD_VERSION);
     let result = platform::run();
     versions::withdraw(&config, versions::Component::Tray);
+    singleton::release();
     result
 }
