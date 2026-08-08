@@ -58,7 +58,10 @@ use process::{parse_macos_ps_env_candidate, parse_macos_ps_env_candidates, parse
 #[allow(unused_imports)]
 use process::parse_proc_net_tcp_line;
 
-#[cfg(target_os = "windows")]
+// Not gated to Windows: these parsers are pure string functions compiled
+// everywhere (see process/platform.rs), and their tests run on every CI runner
+// so a wrong expectation is caught by the first host to build, not only by the
+// Windows one.
 #[allow(unused_imports)]
 use process::{
     parse_windows_environment_block, parse_windows_netstat_line, parse_windows_netstat_stdout,
